@@ -209,8 +209,9 @@ class Protocol(unittest.TestCase):
         for log in ("local-tests.txt","native-build.log"):
             self.assertIn('|| { tail -n 60 "$G3_ARTIFACTS/'+log+'"; exit 1; }',text)
         pins=json.loads((ROOT/"src/paper2/prototype/source_pins.json").read_text())
+        workflows=text+(ROOT/"src/paper2/prototype/paper2-g3-replay.yml").read_text()
         for commit in pins["actions"].values():
-            self.assertEqual(len(commit),40);self.assertIn("@"+commit,text)
+            self.assertEqual(len(commit),40);self.assertIn("@"+commit,workflows)
 
     def test_generated_workflow_passes_actionlint_and_old_context_fails(self):
         if os.environ.get("GITHUB_ACTIONS")=="true":
@@ -222,6 +223,10 @@ class Protocol(unittest.TestCase):
             root=Path(root);manifest=export.export(root/"bundle",allow_dirty=True)
             receipt=manifest["actionlint"]
             self.assertEqual((receipt["returncode"],receipt["stdout"],receipt["stderr"]),(0,"",""))
+            self.assertEqual(set(manifest["actionlint_workflows"]),{"paper2-g3.yml","paper2-g3-replay.yml"})
+            for name,item in manifest["actionlint_workflows"].items():
+                self.assertEqual((item["returncode"],item["stdout"],item["stderr"]),(0,"",""))
+                self.assertEqual(item["workflow_sha256"],analysis.sha256_file(root/"bundle/.github/workflows"/name))
             workflow=root/"bundle/.github/workflows/paper2-g3.yml"
             self.assertEqual(receipt["workflow_sha256"],analysis.sha256_file(workflow))
             broken=root/"broken.yml"

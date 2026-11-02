@@ -16,10 +16,11 @@ import time
 import traceback
 
 from src.paper2.model.service_times import ROOT,derive_seed,STREAM_NAMES
+from src.paper2.model.engine import _git_state
 from src.paper2.workload import generate_workload
 from src.paper2.verify.invariants import check
-from . import corpus
-from .analysis import references,cells,dispatcher_guard,distribution,costs,metrics,compare,samples_from_jobs,paired
+from . import corpus,replay
+from .analysis import references,cells,dispatcher_guard,metrics
 from .calibration import calibrate_once
 from .runtime import run
 
@@ -82,16 +83,6 @@ def prototype_run(config,corpus_path):
     return result
 
 
-def simulation_run(config,corpus_path,sample_path,backend,mapped):
-    begin=time.perf_counter();e,m=paired(config,corpus_path,sample_path,backend,
-        mapped["structural_cost"],mapped["state_cost"])
-    violations=check(e,e.parent/"jobs.csv",m)
-    result=dict(events=str(e),manifest=str(m),metrics=metrics(e,e.parent/"jobs.csv",m),
-        violations=violations,elapsed=time.perf_counter()-begin)
-    save(e.parent/"verification.json",result)
-    return result
-
-
 def remaining(root):
     start=json.loads((root/"watchdog.json").read_text())["monotonic_ns"]
     return 280*60-(time.monotonic_ns()-start)/1e9
@@ -103,7 +94,11 @@ def project(root,stage,seconds,details):
     if seconds>record["available_seconds"]:raise RuntimeError("STOP: remaining fixed protocol exceeds 280-minute budget")
 
 
-STAGE_CAPS=dict(pilot=10*60,calibration=20*60,presigning=50*60,prototype=88*60,simulation=30*60)
+STAGE_CAPS=dict(pilot=10*60,calibration=20*60,presigning=50*60,prototype=88*60)
+
+
+def arm_remaining_projection(signing_seconds,run_count):
+    return signing_seconds+run_count*110+7*60
 
 
 def account(root,totals,stage,seconds):
@@ -129,7 +124,7 @@ def execute(root):
     if platform.machine().lower() not in ("aarch64","arm64") or len(os.sched_getaffinity(0))<4:
         raise RuntimeError("ARM runner with at least four usable vCPUs required")
     if not (root/"conformance.json").is_file():raise RuntimeError("native conformance must precede calibration")
-    start=time.monotonic();state=dict(status="calibration",cells=[],comparisons=[]);stage_times={}
+    start=time.monotonic();state=dict(status="calibration",cells=[],prototypes=[]);stage_times={}
     save(root/"protocol.json",state)
     try:
         calibrations={};all_cal={};pilots={}
@@ -180,8 +175,11 @@ def execute(root):
         if not eligible:raise RuntimeError("No eligible G3 cells: dispatcher-bound, not a valid worker-contention test")
         validation_backends=[b for b in VALIDATION if any(c["backend"]==b for c in eligible)]
         run_count=3*len(eligible)
+        inputs=root/"replay-inputs"
+        index=replay.initialize(inputs,planned,excluded,os.environ.get("GITHUB_SHA") or _git_state()["commit"],
+                                os.environ.get("GITHUB_RUN_ID","local"))
         # Project signing before bulk work. Include key generation, verification,
-        # measured signing rate, spawn overhead and both simulator comparisons.
+        # measured signing rate and spawn overhead. Replay is a separate workflow.
         traces={};messages={};sign_projection=0
         for backend in validation_backends:
             peak=max((c for c in eligible if c["backend"]==backend),key=lambda c:c["rate"])
@@ -205,21 +203,12 @@ def execute(root):
             sign_projection+=seconds
             messages[backend]=dict(messages=n,key_count_upper_bound=key_bound,signing_rate_per_process=rate,keygen_seconds=key_seconds,
                                    parallel_processes=2,projected_seconds=seconds)
-        sim_projection=0
-        for cell in eligible:
-            backend=cell["backend"]
-            per_item=max(r["simulation_cpu_seconds_per_logical_item"] for r in all_cal[backend] if r["k"]==cell["k"])
-            # Every offered valid transaction can produce an admission and a
-            # logical block check; every block also has its own signature.
-            logical=2*90*cell["rate"]+90/cell["period"]
-            sim_projection+=3*2*(1+1.5*logical*per_item)
-        sim_allowance=max(30*60,sim_projection)
-        projection_detail=dict(signing=messages,simulator_seconds=sim_projection,simulator_allowance=sim_allowance,
-                               prototype_runs=run_count,simulator_runs=2*run_count,excluded_cells=excluded)
-        if sign_projection>STAGE_CAPS["presigning"] or sim_projection>STAGE_CAPS["simulation"]:
+        projection_detail=dict(signing=messages,prototype_runs=run_count,excluded_cells=excluded,
+                               simulation="separate deterministic replay workflow; no ARM simulation budget")
+        if sign_projection>STAGE_CAPS["presigning"]:
             save(root/"projection-stage-cap-failure.json",projection_detail)
-            raise RuntimeError("STOP: fixed signing or simulator stage projection exceeds approved cap")
-        project(root,"presigning",sign_projection+run_count*110+sim_allowance+7*60,projection_detail)
+            raise RuntimeError("STOP: fixed signing stage projection exceeds approved cap")
+        project(root,"presigning",arm_remaining_projection(sign_projection,run_count),projection_detail)
         masters={}
         for backend in validation_backends:
             for rep,file in enumerate(traces[backend]):
@@ -228,9 +217,9 @@ def execute(root):
                 corpus.validate(data,primitive_checks=True)
                 masters[backend,rep]=corpus.write(data,root/"corpora"/f"{backend}-master-r{rep}.json")
                 account(root,stage_times,"presigning",time.perf_counter()-before)
-        project(root,"validation",run_count*110+sim_allowance+7*60,dict(prototype_runs=run_count,simulator_runs=2*run_count,
-            same_run_and_held_out=True,signing_projection=messages))
-        state["status"]="validation"
+        project(root,"prototype",arm_remaining_projection(0,run_count),dict(prototype_runs=run_count,
+            simulation="separate replay workflow",signing_projection=messages))
+        state["status"]="prototype collection: replay pending"
         for cell_id,cell in enumerate(planned):
             if cell not in eligible:continue
             for rep in range(3):
@@ -245,40 +234,26 @@ def execute(root):
                 config=settings(data["workload"],cell,base/"prototype")
                 before=time.perf_counter()
                 proto=fresh(prototype_run,(config,path),min(180,remaining(root)))
+                rid=f"cell{cell_id}-r{rep}"
+                entry=next(r for r in index["runs"] if r["run_id"]==rid)
+                entry["manifest_sha256"]=replay.create_packet(inputs/rid,config,path,proto,
+                    calibrations[backend][cell["k"]]["occupancy_samples"],cell,rep)
+                replay.write_index(inputs,index)
                 account(root,stage_times,"prototype",time.perf_counter()-before)
-                meta=json.loads(Path(proto["manifest"]).read_text());mapped=costs(meta)
-                samples=samples_from_jobs(Path(proto["events"]).parent/"jobs.csv",base/"primary-occupancy.csv",backend,"validation")
-                before=time.perf_counter()
-                primary=fresh(simulation_run,(dict(config,output_dir=str(base/"primary")),path,samples,backend,mapped),remaining(root)-7*60)
-                secondary=fresh(simulation_run,(dict(config,output_dir=str(base/"held-out")),path,
-                    calibrations[backend][cell["k"]]["occupancy_samples"],backend,mapped),remaining(root)-7*60)
-                account(root,stage_times,"simulation",time.perf_counter()-before)
-                comparison=dict(cell=cell,replicate=rep,seeds={name:derive_seed("paper2-g3-v1",name,rep) for name in STREAM_NAMES},
-                    primary=compare(proto["metrics"],primary["metrics"]),
-                    held_out=compare(proto["metrics"],secondary["metrics"],diagnostic=True),
-                    prototype=proto,primary_simulation=primary,held_out_simulation=secondary,
-                    dispatcher_mapping=mapped,held_out_dispatcher_source="same validation-run structural/state; occupancy held out")
-                state["comparisons"].append(comparison);save(base/"comparison.json",comparison);save(root/"protocol.json",state)
-        state["aggregates"]=[]
-        for cell in eligible:
-            members=[c for c in state["comparisons"] if c["cell"]==cell]
-            aggregate=dict(cell=cell,repetitions=len(members),passed=all(c["primary"]["passed"] for c in members),
-                aggregate_definition="arithmetic mean of per-repetition metrics; every repetition must pass",metrics={})
-            for name in members[0]["primary"]["checks"]:
-                aggregate["metrics"][name]={kind:statistics.fmean(c["primary"]["checks"][name][kind] for c in members)
-                    if all(c["primary"]["checks"][name][kind] is not None for c in members) else None
-                    for kind in ("prototype","simulation")}
-            state["aggregates"].append(aggregate)
-        state["status"]="passed" if all(c["primary"]["passed"] and not c["prototype"]["violations"]
-            and not c["primary_simulation"]["violations"] and not c["held_out_simulation"]["violations"]
-            for c in state["comparisons"]) else "failed: primary agreement/invariants"
+                state["prototypes"].append(dict(run_id=rid,cell=cell,replicate=rep,prototype=proto))
+                save(root/"protocol.json",state)
+                if proto["violations"] or not proto["metrics"]["complete"]:
+                    raise ValueError("prototype incomplete or invariant violations; replay inputs retained")
+        index["status"]=replay.PENDING;replay.write_index(inputs,index)
+        replay.verify(inputs)
+        state["status"]=replay.PENDING
     except BaseException as exc:
-        state.update(status="stopped/failed",failure=str(exc),traceback=traceback.format_exc())
+        state.update(status="prototype-incomplete: replay pending",failure=str(exc),traceback=traceback.format_exc())
         save(root/"protocol.json",state)
         raise
     finally:
         state["orchestrator_wall_seconds"]=time.monotonic()-start;save(root/"protocol.json",state)
-        lines=["# G3 runner outcome", "", "Status: "+state["status"], "", state.get("failure",""), "",
+        lines=["# G3 prototype measurement outcome", "", "Status: "+state["status"], "", state.get("failure",""), "",
             "| Backend | k | Policy | Nominal rho | lambda | B_ref | B_cold | lambda*d_dispatch |",
             "| --- | --- | --- | --- | --- | --- | --- | --- |"]
         for c in state["cells"]:
@@ -287,12 +262,10 @@ def execute(root):
         for item in state.get("excluded_cells",[]):
             c=item["cell"]
             lines.append(str(c)+": "+item["reason"])
-        lines += ["", "All per-repetition metrics, realised utilisation/cache-hit/job-mix values, primary bands,",
-                  "held-out diagnostics and invariant violations are in protocol.json and each comparison.json.",
-                  "Held-out band exceedances are diagnostic; they do not change nominal rho or primary thresholds."]
+        lines += ["", "Per-repetition prototype metrics and invariant results are in protocol.json.",
+                  "Paired primary/held-out simulations and G3 agreement are pending the separate replay workflow.",
+                  "This ARM workflow makes no G3 agreement pass/fail claim."]
         (root/"PROTOCOL_REPORT.md").write_bytes(("\n".join(lines)+"\n").encode())
-    if state["status"]!="passed":
-        raise RuntimeError("G3 failed; inspect retained per-repetition agreement/invariant evidence")
 
 
 def record_host(root):

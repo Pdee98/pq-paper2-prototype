@@ -19,7 +19,7 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.13'
-      - name: Bounded build, conformance, calibration and validation
+      - name: Bounded build, conformance, calibration and prototype measurements
         shell: bash
         run: |
           mkdir -p "$G3_ARTIFACTS"
@@ -54,4 +54,13 @@ jobs:
           name: paper2-g3-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/paper2-g3-artifacts/
           if-no-files-found: error
+          retention-days: 30
+      - name: Upload signature-free replay inputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        timeout-minutes: 8
+        with:
+          name: paper2-g3-replay-inputs-${{ github.run_id }}
+          path: ${{ runner.temp }}/paper2-g3-artifacts/replay-inputs/
+          if-no-files-found: warn
           retention-days: 30

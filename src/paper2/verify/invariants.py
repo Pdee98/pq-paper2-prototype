@@ -26,7 +26,7 @@ def check(events_csv, jobs_csv, manifest):
     cfg, blocks = data["config"], data["blocks"]
     identity_mode = cfg.get("prototype", {}).get("mode")
     real = identity_mode == "real-time-v1"
-    real_identity = identity_mode in ("real-time-v1", "real-byte-simulation-v1")
+    real_identity = identity_mode in ("real-time-v1", "real-byte-simulation-v1", "precomputed-key-replay-v1")
     real_keys, busy_spans = {}, []
     if real_identity:
         from .prototype import inspect, covered, overlap

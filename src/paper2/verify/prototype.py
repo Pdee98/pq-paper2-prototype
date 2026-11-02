@@ -3,6 +3,7 @@
 import hashlib
 import json
 from pathlib import Path
+import re
 
 from src.blockchain.transaction import Transaction
 from src.blockchain.block import Block
@@ -17,6 +18,26 @@ def inspect(rows,jobs,data,manifest):
         return json.loads(raw)
     p=data.get("prototype",{})
     runtime=p.get("mode")=="real-time-v1"
+    if p.get("mode")=="precomputed-key-replay-v1":
+        # The signed-byte check remains on ARM. Here independently bind every
+        # logical/physical check to the hash-bound, exported real-byte key table.
+        base=Path(manifest).parent
+        workload=load(base/p["workload"]["path"],p["workload"]["sha256"])
+        table=load(base/p["keys"]["path"],p["keys"]["sha256"])
+        cfg=data["config"]
+        if cfg["transactions"]!=workload["transactions"] or cfg["blocks"]!=workload["blocks"] or cfg.get("context",{})!=workload.get("context",{}):
+            bad("replay_metadata","simulation differs from exported workload")
+        if set(table)!=set(workload["transactions"]):bad("real_cache_key","key table coverage differs")
+        for identity,tx in workload["transactions"].items():
+            entry=table.get(identity,{})
+            key=entry.get("cache_key","")
+            if not isinstance(key,str) or not re.fullmatch(r"[0-9a-f]{64}",key) or entry.get("size_bytes")!=tx["size_bytes"]:
+                bad("real_cache_key","invalid exported key/size",tx_id=identity)
+            keys[identity]=key
+        for j in jobs:
+            if j["tx_id"] and (j["cache_key"]!=keys.get(j["tx_id"]) or j.get("tx")!=workload["transactions"].get(j["tx_id"])):
+                bad("real_cache_key","job not bound to exported metadata/key",job_id=j["job_id"])
+        return errors,keys,intervals
     if p.get("mode") not in ("real-time-v1","real-byte-simulation-v1"):
         bad("prototype_schema","missing real-time provenance");return errors,keys,intervals
     base=Path(manifest).parent

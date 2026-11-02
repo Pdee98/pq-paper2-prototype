@@ -10,7 +10,6 @@ from .corpus import signed_parts
 from .workers import Workers
 from .runtime import run
 from .analysis import distribution,costs
-from .analysis import paired
 from src.paper2.verify.invariants import check
 
 
@@ -59,7 +58,7 @@ def calibrate_once(corpus_path,k,output,replicate,warmup=2,measurement=10):
         clock_offsets=workers.clock_records,samples=str(output/"occupancy.csv"))
     # Reuse actual Model decisions for a separate dispatcher-cost probe in this
     # fresh calibration process. Its samples never come from a validation run.
-    probes=[];model_costs=[]
+    probes=[]
     for policy in ("fifo","block_priority"):
         config=dict(corpus["workload"],k=k,policy=dict(name=policy),q_max=10000,
             cache=dict(capacity=4096,ttl=2*corpus["workload"]["block_period"]),
@@ -71,14 +70,7 @@ def calibrate_once(corpus_path,k,output,replicate,warmup=2,measurement=10):
         probes.append(dict(policy=policy,dispatcher_per_tx=meta["prototype"]["dispatcher_non_ipc_ns"]/max(n,1)/1e9,
                            dispatcher_definition="active minus measured Pipe send/recv/poll; waits already excluded; no IPC cost added to simulator",
                            mapped_dispatcher=mapped,manifest=str(m)))
-        cpu=time.process_time()
-        se,sm=paired(dict(config,output_dir=str(output/("simulation-probe-"+policy))),corpus_path,
-                     output/"occupancy.csv",backend,mapped["structural_cost"],mapped["state_cost"])
-        failures=check(se,se.parent/"jobs.csv",sm)
-        if failures:raise ValueError("calibration simulation invariants failed: "+str(failures[:3]))
-        count=n+sum(len(b["tx_ids"])+1 for b in config["blocks"])
-        model_costs.append((time.process_time()-cpu)/max(count,1))
     result.update(dispatcher_per_tx=max(p["dispatcher_per_tx"] for p in probes),dispatcher_probes=probes,
-                  simulation_cpu_seconds_per_logical_item=max(model_costs))
+                  simulation="separate deterministic replay workflow (Deviation 3)")
     (output/"calibration.json").write_bytes(json.dumps(result,indent=2).encode()+b"\n")
     return result

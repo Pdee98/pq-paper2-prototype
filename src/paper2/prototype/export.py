@@ -123,16 +123,17 @@ def export(destination,allow_dirty=False):
     target=destination/"PROTECTED_SHA256.txt";shutil.copyfile(baseline_file,target)
     records.append(dict(path=target.name,origin_path="research/paper2/phase0/protected_sha256.txt",
                         sha256=sha256_file(target),frozen=False))
-    workflow=".github/workflows/paper2-g3.yml";target=destination/workflow;target.parent.mkdir(parents=True)
-    template=(ROOT/"src/paper2/prototype/paper2-g3.yml").read_text()
-    # The runner only copies the plan for provenance; all executable settings
-    # are already in code. Omit that document-copy operand in the exported workflow.
-    target.write_bytes(template.replace("research/paper2/phase5/RUNTIME_PLAN.md ","").encode())
-    lint=lint_workflow(target)
-    records.append(dict(path=workflow,origin="generated",origin_path="generated:src/paper2/prototype/paper2-g3.yml",
-                        sha256=sha256_file(target),frozen=False))
+    workflow_lints={}
+    for template_path in sorted((ROOT/"src/paper2/prototype").glob("paper2-g3*.yml")):
+        workflow=".github/workflows/"+template_path.name;target=destination/workflow;target.parent.mkdir(parents=True,exist_ok=True)
+        template=template_path.read_text()
+        target.write_bytes(template.replace("research/paper2/phase5/RUNTIME_PLAN.md ","").encode())
+        workflow_lints[template_path.name]=lint_workflow(target)
+        records.append(dict(path=workflow,origin="generated",origin_path="generated:"+template_path.relative_to(ROOT).as_posix(),
+                            sha256=sha256_file(target),frozen=False))
+    lint=workflow_lints["paper2-g3.yml"]
     generated={
-        "README.md": "This is a research prototype for an unpublished study (Paper 2; authors Appiah, Opoku and Asare, Kumasi Technical University). Its results are not yet published or peer-reviewed. To dispatch validation after publishing this bundle on GitHub, open Actions, select Paper 2 G3 validation, choose Run workflow, select main, and confirm Run workflow. The workflow runs only by manual dispatch; native conformance and G3 agreement remain unverified until the resulting artifact is reviewed.\n",
+        "README.md": "This is a research prototype for an unpublished study (Paper 2; authors Appiah, Opoku and Asare, Kumasi Technical University). Its results are not yet published or peer-reviewed. In GitHub Actions, manually dispatch Paper 2 G3 validation for ARM measurements; when it reports prototype-complete: replay pending, manually dispatch Paper 2 G3 deterministic replay with source_run_id set to that ARM run ID. Only the replay gather report determines G3 agreement, after reviewing its evidence. Both workflows use workflow_dispatch only; no workflow is dispatched by exporting or publishing this bundle.\n",
         "LICENSE": "License to be decided by the authors before publication.\n",
     }
     for name,content in generated.items():
@@ -141,7 +142,7 @@ def export(destination,allow_dirty=False):
     audit=audit_payload(destination,records)
     manifest=dict(schema="paper2-export-v1",source_commit=git["commit"],source_dirty=git["dirty"],
         baseline_sha256=sha256_file(baseline_file),baseline_path="PROTECTED_SHA256.txt",
-        excluded=EXCLUDED,export_audit=audit,actionlint=lint,files=sorted(records,key=lambda r:r["path"]),
+        excluded=EXCLUDED,export_audit=audit,actionlint=lint,actionlint_workflows=workflow_lints,files=sorted(records,key=lambda r:r["path"]),
         self_descriptors=["BUNDLE_MANIFEST.json","BUNDLE_MANIFEST.sha256"],
         excluded_mutable_directories=[".git","artifacts","__pycache__"],
         no_results_or_calibration_data=True)
