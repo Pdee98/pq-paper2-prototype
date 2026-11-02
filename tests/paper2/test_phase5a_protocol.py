@@ -1,18 +1,29 @@
 """Hand-checked amended protocol, independent replay inputs, and export integrity."""
 
-from tests.paper2._provenance import setUpModule, tearDownModule
+from tests.paper2._provenance import setUpModule as provenance_setup, tearDownModule
 
 import csv
 import json
 from pathlib import Path
 import tempfile
 import unittest
+import subprocess
+import sys
 from unittest.mock import patch
 
 from src.paper2.prototype import analysis,corpus,export
 from src.paper2.model.service_times import ROOT
 from src.paper2.verify.invariants import check
 from tests.paper2._support import config
+
+
+def setUpModule():
+    # The runner installs only cryptography in its unchanged build script.
+    # Bootstrap the pinned test dependency when its executable is unavailable.
+    if not export.actionlint_command():
+        subprocess.run([sys.executable,"-m","pip","install","--disable-pip-version-check",
+                        "actionlint-py=="+export.ACTIONLINT_PY_VERSION],check=True,timeout=180)
+    provenance_setup()
 
 
 class Protocol(unittest.TestCase):
@@ -127,9 +138,32 @@ class Protocol(unittest.TestCase):
         self.assertIn("runs-on: ubuntu-24.04-arm",text)
         self.assertIn("timeout-minutes: 330",text)
         self.assertIn("280m bash",text)
+        job_env=text.split("    env:\n",1)[1].split("    steps:\n",1)[0]
+        self.assertNotIn("runner.temp",job_env)
+        self.assertIn('echo "G3_ARTIFACTS=$RUNNER_TEMP/paper2-g3-artifacts" >> "$GITHUB_ENV"',text)
+        self.assertIn("path: ${{ runner.temp }}/paper2-g3-artifacts/",text)
         pins=json.loads((ROOT/"src/paper2/prototype/source_pins.json").read_text())
         for commit in pins["actions"].values():
             self.assertEqual(len(commit),40);self.assertIn("@"+commit,text)
+
+    def test_generated_workflow_passes_actionlint_and_old_context_fails(self):
+        with tempfile.TemporaryDirectory() as root:
+            root=Path(root);manifest=export.export(root/"bundle",allow_dirty=True)
+            receipt=manifest["actionlint"]
+            self.assertEqual((receipt["returncode"],receipt["stdout"],receipt["stderr"]),(0,"",""))
+            workflow=root/"bundle/.github/workflows/paper2-g3.yml"
+            self.assertEqual(receipt["workflow_sha256"],analysis.sha256_file(workflow))
+            broken=root/"broken.yml"
+            broken.write_text(workflow.read_text().replace("    env:\n","    env:\n      INVALID: ${{ runner.temp }}\n",1))
+            with self.assertRaisesRegex(RuntimeError,"actionlint rejected"):
+                export.lint_workflow(broken)
+
+    def test_export_fails_on_actionlint_findings(self):
+        with tempfile.TemporaryDirectory() as root:
+            with patch.object(export,"lint_workflow",side_effect=RuntimeError("actionlint rejected")):
+                with self.assertRaisesRegex(RuntimeError,"actionlint rejected"):
+                    export.export(Path(root)/"bundle",allow_dirty=True)
+            self.assertFalse((Path(root)/"bundle/BUNDLE_MANIFEST.json").exists())
 
     def test_small_concurrency_capture_and_dispatcher_mapping(self):
         from src.paper2.prototype.calibration import calibrate_once

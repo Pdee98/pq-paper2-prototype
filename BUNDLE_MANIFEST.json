@@ -1,6 +1,6 @@
 {
   "schema": "paper2-export-v1",
-  "source_commit": "dddfc996290ed1442297a28cce96d5cab8997c0b",
+  "source_commit": "6284700b15cc2e8de1edd92a7e3ade550007aff8",
   "source_dirty": false,
   "baseline_sha256": "83b4a814f99c851c0b5fa4c44e6c2999ceff5f751f70f387e9dac03ec03079f3",
   "baseline_path": "PROTECTED_SHA256.txt",
@@ -41,12 +41,20 @@
     ],
     "hits": []
   },
+  "actionlint": {
+    "version": "1.7.12",
+    "package_version": "1.7.12.25",
+    "returncode": 0,
+    "stdout": "",
+    "stderr": "",
+    "workflow_sha256": "33065687741c2182aab0c1f707e74a52c92d880ad7471be6deb9d4aa4903de82"
+  },
   "files": [
     {
       "path": ".github/workflows/paper2-g3.yml",
       "origin": "generated",
       "origin_path": "generated:src/paper2/prototype/paper2-g3.yml",
-      "sha256": "015848833f1a6e63d6e616734978207336d45ddf95b2c2d8674ece6549d47a09",
+      "sha256": "33065687741c2182aab0c1f707e74a52c92d880ad7471be6deb9d4aa4903de82",
       "frozen": false
     },
     {
@@ -210,13 +218,13 @@
     {
       "path": "src/paper2/prototype/export.py",
       "origin_path": "src/paper2/prototype/export.py",
-      "sha256": "05cf4d89c80dc128800c213e15fdb8a12cce1298f8dec2f089b56a0bd25d3a15",
+      "sha256": "543c4c4a04dcd426fd17c0e680d2a1acf893517a8608257a641d5f461d9a76df",
       "frozen": false
     },
     {
       "path": "src/paper2/prototype/paper2-g3.yml",
       "origin_path": "src/paper2/prototype/paper2-g3.yml",
-      "sha256": "7b94f1514d9e40dc59b2a393f072805956d15d70272b496d18e532ac1cc76ee5",
+      "sha256": "5df3f16c355175a537013ff8ae4f80d48d95f6d85a269feb8d44d26be21bd7eb",
       "frozen": false
     },
     {
@@ -348,7 +356,7 @@
     {
       "path": "tests/paper2/test_phase5a_protocol.py",
       "origin_path": "tests/paper2/test_phase5a_protocol.py",
-      "sha256": "125e81c09ca0ab8a9da3a20d20d728283181796fb3fad0e79de49374fa7ef977",
+      "sha256": "fe8a14605f3b2c6749bc7d9c18baa4472e79e4e658005e16895a17634518e641",
       "frozen": false
     },
     {

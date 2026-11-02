@@ -8,6 +8,8 @@ import re
 from pathlib import Path
 import shutil
 import subprocess
+import sys
+from importlib.metadata import version, PackageNotFoundError
 
 from src.paper2.model.service_times import ROOT,BASELINE,sha256_file
 from src.paper2.model.engine import _git_state
@@ -19,6 +21,26 @@ ALLOWLIST={
     "C:/Program Files/Git/cmd/git.exe":"standard Windows install fallback",
 }
 EXCLUDED=["research/**", "research/paper2/STANDING_RULES.md", "research/paper2/phase5/RUNTIME_PLAN.md"]
+ACTIONLINT_PY_VERSION="1.7.12.25"
+
+
+def actionlint_command():
+    local=Path(sys.executable).parent/("actionlint.exe" if sys.platform=="win32" else "actionlint")
+    return str(local) if local.is_file() else shutil.which("actionlint")
+
+
+def lint_workflow(path):
+    command=actionlint_command()
+    if not command:raise RuntimeError("actionlint is required; install actionlint-py=="+ACTIONLINT_PY_VERSION)
+    result=subprocess.run([command,"-no-color",str(path)],capture_output=True,text=True,timeout=60)
+    if result.returncode or result.stdout.strip() or result.stderr.strip():
+        raise RuntimeError("actionlint rejected generated workflow:\n"+result.stdout+result.stderr)
+    info=subprocess.run([command,"-version"],capture_output=True,text=True,check=True,timeout=30)
+    try:package_version=version("actionlint-py")
+    except PackageNotFoundError:package_version=None
+    return dict(version=info.stdout.splitlines()[0],package_version=package_version,
+                returncode=result.returncode,stdout=result.stdout,stderr=result.stderr,
+                workflow_sha256=sha256_file(Path(path)))
 
 
 def baseline_source():
@@ -106,6 +128,7 @@ def export(destination,allow_dirty=False):
     # The runner only copies the plan for provenance; all executable settings
     # are already in code. Omit that document-copy operand in the exported workflow.
     target.write_bytes(template.replace("research/paper2/phase5/RUNTIME_PLAN.md ","").encode())
+    lint=lint_workflow(target)
     records.append(dict(path=workflow,origin="generated",origin_path="generated:src/paper2/prototype/paper2-g3.yml",
                         sha256=sha256_file(target),frozen=False))
     generated={
@@ -118,7 +141,7 @@ def export(destination,allow_dirty=False):
     audit=audit_payload(destination,records)
     manifest=dict(schema="paper2-export-v1",source_commit=git["commit"],source_dirty=git["dirty"],
         baseline_sha256=sha256_file(baseline_file),baseline_path="PROTECTED_SHA256.txt",
-        excluded=EXCLUDED,export_audit=audit,files=sorted(records,key=lambda r:r["path"]),
+        excluded=EXCLUDED,export_audit=audit,actionlint=lint,files=sorted(records,key=lambda r:r["path"]),
         self_descriptors=["BUNDLE_MANIFEST.json","BUNDLE_MANIFEST.sha256"],
         excluded_mutable_directories=[".git","artifacts","__pycache__"],
         no_results_or_calibration_data=True)

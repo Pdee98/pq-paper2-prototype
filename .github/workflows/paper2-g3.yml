@@ -9,9 +9,12 @@ jobs:
     timeout-minutes: 330
     env:
       PYTHONDONTWRITEBYTECODE: '1'
-      PYTHONPYCACHEPREFIX: ${{ runner.temp }}/paper2-pycache
-      G3_ARTIFACTS: ${{ runner.temp }}/paper2-g3-artifacts
     steps:
+      - name: Set runner-temp paths
+        shell: bash
+        run: |
+          echo "PYTHONPYCACHEPREFIX=$RUNNER_TEMP/paper2-pycache" >> "$GITHUB_ENV"
+          echo "G3_ARTIFACTS=$RUNNER_TEMP/paper2-g3-artifacts" >> "$GITHUB_ENV"
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
