@@ -680,6 +680,8 @@ def run_model(config, *, model_type=Model) -> tuple[Path, Path]:
             writer.writerow(getattr(model, "event_fields", EVENT_FIELDS))
             model.event_writer = model.wrap_writer(writer) if hasattr(model, "wrap_writer") else writer
             model.run()
+            if hasattr(model.event_writer, "flush"):
+                model.event_writer.flush()
         with job_file.open("x", encoding="utf-8", newline="", buffering=1024*1024) as stream:
             writer = csv.writer(stream)
             writer.writerow(("job_id","record"))

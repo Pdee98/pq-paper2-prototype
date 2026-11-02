@@ -8,7 +8,7 @@ from pathlib import Path
 import time
 from multiprocessing.connection import wait
 
-from src.paper2.model.engine import Model, EVENT_FIELDS, run_model
+from src.paper2.model.engine import Model, EVENT_FIELDS, EVENT_INDEX, run_model
 from src.paper2.model.service_times import JOB_CLASSES, sha256_file
 from src.paper2.state import Ledger
 from .corpus import cache_key, signed_parts, validate_entry, validate
@@ -37,7 +37,8 @@ class EventWriter:
     def writerow(self,row):self.writer.writerow(row+[self.model.extra_row.get(k,"") for k in PROTOTYPE_FIELDS])
 
 
-class RealtimeModel(Model):
+class LegacyRealtimeModel(Model):
+    """Pre-Deviation-2 implementation, retained for decision equivalence tests."""
     event_fields=EVENT_FIELDS+PROTOTYPE_FIELDS
 
     def __init__(self,config,corpus_path,sleep_seconds=0,stop_t=None):
@@ -196,6 +197,150 @@ class RealtimeModel(Model):
             dispatcher_active_ns=active,dispatcher_ipc_ns=self.ipc_ns,
             dispatcher_non_ipc_ns=max(0,active-self.ipc_ns),
             unmodelled_dispatcher_ns=max(0,active-structural-state),releases=self.released))
+
+
+class BufferedEventWriter:
+    """Bounded fixed-width snapshots; CSV work occurs after run/drain finishes.
+
+    Capacity is reserved before the epoch. Overflow aborts, never drops rows.
+    A slot contains immutable scalar values, never a mutable Job/ledger object.
+    """
+    def __init__(self,writer,capacity,encode=None):
+        if isinstance(capacity,bool) or not isinstance(capacity,int) or capacity<1:
+            raise ValueError("positive event buffer capacity required")
+        self.writer=writer;self.records=[None]*capacity;self.encode=encode
+        self.count=0;self.flushed=0
+
+    def writerow(self,row):
+        if self.count==len(self.records):raise BufferError("prototype event buffer capacity exceeded")
+        self.records[self.count]=tuple(row);self.count+=1
+
+    def flush(self):
+        while self.flushed<self.count:
+            record=self.records[self.flushed]
+            self.writer.writerow(self.encode(record) if self.encode else record)
+            self.records[self.flushed]=None;self.flushed+=1
+
+
+class RealtimeModel(LegacyRealtimeModel):
+    """Same decisions/transport, prepared bytes and deferred schema-v4 records."""
+    MAX_EVENT_ROWS=8_000_000
+
+    def __init__(self,config,corpus_path,sleep_seconds=0,stop_t=None):
+        super().__init__(config,corpus_path,sleep_seconds,stop_t)
+        # The corpus has already been checked against the frozen wire objects.
+        # Bind every normalized internal transaction (including admission
+        # overrides) to it ONCE, before the epoch. Model never mutates these.
+        self.prepared_tx={name:signed_parts(e) for name,e in self.corpus["transactions"].items()}
+        self.prepared_blocks={name:signed_parts(e) for name,e in self.corpus["blocks"].items()}
+        self.validated_tx=set()
+        txs=list(self.transactions.values())
+        for _,_,_,callback,args in self.events:
+            if getattr(callback,"__func__",None) is Model._admission:txs.append(args[1])
+        for tx in txs:
+            validate_entry(self.corpus["transactions"][tx["tx_id"]],self.corpus["context"],tx)
+            self.validated_tx.add(id(tx))
+        # Block composition/signature labels must also match the prepared corpus.
+        expected={b["block_id"]:b for b in self.corpus["workload"]["blocks"]}
+        for b in config.get("blocks",[]):
+            reference=expected.get(b["block_id"])
+            if reference is None or b["tx_ids"]!=reference["tx_ids"] or b.get("block_sig_label","valid")!=reference.get("block_sig_label","valid"):
+                raise ValueError("block metadata differs from prepared corpus")
+        logical=sum(len(b["tx_ids"])+1 for b in config.get("blocks",[]))
+        self.event_capacity=min(self.MAX_EVENT_ROWS,max(1024,24*(len(config.get("admissions",[]))+logical)))
+        self.block_snapshots={};self.job_snapshots={}
+
+    def wrap_writer(self,writer):return BufferedEventWriter(writer,self.event_capacity,self.serialize_event)
+
+    def _key(self,tx):
+        return self.corpus["transactions"][tx["tx_id"]]["cache_key"]
+
+    def _admit_ready(self,job):
+        begin=time.monotonic_ns()
+        if id(job.tx) not in self.validated_tx:raise ValueError("unprepared transaction metadata")
+        self.costs.append(dict(kind="structural",items=1,duration_ns=time.monotonic_ns()-begin))
+        Model._admit_ready(self,job)
+
+    def _block_ready(self,bid,jobs,structurally_valid):
+        begin=time.monotonic_ns();txs=self.block_transactions[bid]
+        if any(id(tx) not in self.validated_tx for tx in txs):raise ValueError("unprepared block metadata")
+        self.costs.append(dict(kind="structural",items=len(txs)+1,duration_ns=time.monotonic_ns()-begin))
+        Model._block_ready(self,bid,jobs,structurally_valid)
+
+    def _start(self,job,worker):
+        payload,signature,public=self.prepared_tx[job.tx_id] if job.tx else self.prepared_blocks[job.block_id]
+        job.send_ns=time.monotonic_ns()
+        self.workers.pipes[worker].send(("verify",job.job_id,payload,signature,public))
+        self.ipc_ns+=time.monotonic_ns()-job.send_ns
+        job.dispatch_to_start_ns=job.send_ns-self.dispatch_ns[job.job_id]
+        job.dispatch_decision_ns=self.dispatch_ns[job.job_id]
+        job.scheduled_service_unknown=True
+        self.t=(job.send_ns-self.epoch)/1e9
+        Model._start(self,job,worker)
+
+    def _log(self,event,job=None,block_id="",**extra):
+        if event=="start":now=job.send_ns
+        elif event=="end":now=job.receive_ns
+        elif event.startswith("dispatcher_busy_"):now=self.marker_ns
+        else:now=time.monotonic_ns()
+        self.t=(now-self.epoch)/1e9
+        if event=="enqueue" and job:job.enqueue_t=self.t
+        if event=="block_arrive":self.blocks[block_id].update(arrival_t=self.t,deadline_t=self.t+self.deadline)
+        if event in ("block_accept","block_reject"):
+            self.blocks[block_id]["accept_t" if event=="block_accept" else "reject_t"]=self.t
+        scheduled=""
+        if event in ("tx_arrive","block_arrive"):
+            scheduled=self.scheduled_t
+            self.released.append(dict(event=event,identity=job.tx_id if job else block_id,
+                scheduled_t=scheduled,release_t=self.t,lateness=self.t-scheduled))
+        if event=="dispatch" and extra.get("chosen_job_id"):self.dispatch_ns[extra["chosen_job_id"]]=now
+        qa,qb,busy=self.pool.counts()
+        bid=job.block_id if job else block_id
+        # Immutable job snapshots change only at enqueue/start/end. No mutable
+        # object enters the buffer and no future state leaks into earlier rows.
+        snapshot=None
+        if job:
+            snapshot=self.job_snapshots.get(job.job_id)
+            if snapshot is None or event in ("enqueue","start","end"):
+                values=job.__dict__
+                snapshot=(job.job_id,job.job_class,job.tx_id,job.block_id,job.worker_id,
+                    job.service_time,job.enqueue_t,job.start_t,job.end_t,job.sig_label,job.cache_key,job.outcome,
+                    values.get("send_ns",""),values.get("receive_ns",""),values.get("worker_start_ns",""),
+                    values.get("worker_end_ns",""),values.get("occupancy_ns",""),values.get("primitive_ns",""),
+                    values.get("dispatch_to_start_ns",""),values.get("dispatch_to_worker_start_ns",""))
+                self.job_snapshots[job.job_id]=snapshot
+        block=None
+        if bid:
+            if event in ("block_arrive","block_accept","block_reject"):
+                b=self.blocks[bid]
+                self.block_snapshots[bid]=(bid,b["arrival_t"],b["accept_t"],b["deadline_t"],
+                    b["reject_t"],b["reject_reason"],b["reject_reasons"])
+            block=self.block_snapshots[bid]
+        record=(self.row_count,self.t,event,qa,qb,busy,snapshot,block,tuple(extra.items()),now,scheduled,self.span_id)
+        if self.event_writer is None:self.rows.append(dict(zip(self.event_fields,self.serialize_event(record))))
+        else:self.event_writer.writerow(record)
+        self.row_count+=1
+
+    def serialize_event(self,record):
+        seq,t,event,qa,qb,busy,job,block,extra,now,scheduled,span=record
+        row=[None]*len(EVENT_FIELDS)
+        row[:4]=self.run_id,seq,t,event;row[10:13]=qa,qb,busy
+        if job:
+            for index,value in zip((4,5,6,7,8,9,13,14,15,20,21),job):row[index]=value
+            if event=="end":row[16]=job[11]
+        if block:
+            for index,value in zip((7,17,18,19,22,23,24),block):row[index]=value
+        for name,value in extra:row[EVENT_INDEX[name]]=value
+        return row+[now,scheduled,span]+(list(job[12:]) if job else [""]*8)
+
+    def extra_manifest(self,directory):
+        result=super().extra_manifest(directory)
+        result["prototype"]["event_buffer"]=dict(capacity=self.event_capacity,rows=self.row_count,
+            serialization="after finish_ns and drain; fixed-width immutable snapshots; overflow aborts")
+        result["prototype"]["preparation"]=dict(validation="before epoch against frozen wire objects",
+            cache_keys="validated corpus keys",payloads="decoded before epoch",
+            online_structural_check="membership of immutable, prevalidated normalized transactions")
+        return result
 
 
 def run(config,corpus_path,*,sleep_seconds=0,stop_t=None):

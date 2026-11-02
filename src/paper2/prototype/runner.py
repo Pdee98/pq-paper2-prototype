@@ -27,6 +27,13 @@ BACKENDS=("ed25519","ml_dsa_44","slh_dsa_sha2_128s","xmss")
 VALIDATION=("xmss","ml_dsa_44")
 
 
+def partition_cells(planned):
+    """Deviation 2: retain every planned cell; exclude guard failures unchanged."""
+    failed=dispatcher_guard(planned)
+    return ([c for c in planned if c not in failed],
+            [dict(cell=c,reason="dispatcher-bound, not a valid worker-contention test") for c in failed])
+
+
 def save(path,value):
     Path(path).parent.mkdir(parents=True,exist_ok=True)
     Path(path).write_bytes(json.dumps(value,indent=2).encode()+b"\n")
@@ -165,20 +172,26 @@ def execute(root):
             calibrations[backend]=refs
         planned=cells({name:calibrations[name] for name in VALIDATION})
         state["cells"]=planned;save(root/"planned-cells.json",planned)
-        failed=dispatcher_guard(planned);save(root/"dispatcher-guard.json",dict(limit=.5,violating_cells=failed,cells=planned))
-        if failed:raise RuntimeError("STOP before validation: planned dispatcher utilisation exceeds 0.5")
+        eligible,excluded=partition_cells(planned)
+        state["excluded_cells"]=excluded;state["eligible_cells"]=eligible
+        save(root/"dispatcher-guard.json",dict(limit=.5,violating_cells=dispatcher_guard(planned),
+            excluded_cells=excluded,eligible_cells=eligible,cells=planned,deviation=2))
+        save(root/"protocol.json",state)
+        if not eligible:raise RuntimeError("No eligible G3 cells: dispatcher-bound, not a valid worker-contention test")
+        validation_backends=[b for b in VALIDATION if any(c["backend"]==b for c in eligible)]
+        run_count=3*len(eligible)
         # Project signing before bulk work. Include key generation, verification,
         # measured signing rate, spawn overhead and both simulator comparisons.
         traces={};messages={};sign_projection=0
-        for backend in VALIDATION:
-            peak=max((c for c in planned if c["backend"]==backend),key=lambda c:c["rate"])
+        for backend in validation_backends:
+            peak=max((c for c in eligible if c["backend"]==backend),key=lambda c:c["rate"])
             traces[backend]=[];count=0
             for rep in range(3):
                 w=generate_workload(parameters(peak["rate"],rep,peak["period"]))
                 file=root/"traces"/f"{backend}-r{rep}.json";save(file,w);traces[backend].append(file)
                 count+=len(w["transactions"])+len(w["blocks"])
             # Block signatures are condition-specific even when transactions reuse a master.
-            block_count=sum(3*math.floor(90/c["period"]) for c in planned if c["backend"]==backend)
+            block_count=sum(3*math.floor(90/c["period"]) for c in eligible if c["backend"]==backend)
             n=count+block_count;ledgers=[v for kind in pilots[backend]["presigning"].values() for v in kind["keys"]]
             signed=sum(v["count"] for v in ledgers);sign_seconds=sum(v["signing_ns"] for v in ledgers)/1e9
             key_seconds=statistics.fmean(v["keygen_ns"] for v in ledgers)/1e9
@@ -193,7 +206,7 @@ def execute(root):
             messages[backend]=dict(messages=n,key_count_upper_bound=key_bound,signing_rate_per_process=rate,keygen_seconds=key_seconds,
                                    parallel_processes=2,projected_seconds=seconds)
         sim_projection=0
-        for cell in planned:
+        for cell in eligible:
             backend=cell["backend"]
             per_item=max(r["simulation_cpu_seconds_per_logical_item"] for r in all_cal[backend] if r["k"]==cell["k"])
             # Every offered valid transaction can produce an admission and a
@@ -202,23 +215,24 @@ def execute(root):
             sim_projection+=3*2*(1+1.5*logical*per_item)
         sim_allowance=max(30*60,sim_projection)
         projection_detail=dict(signing=messages,simulator_seconds=sim_projection,simulator_allowance=sim_allowance,
-                               prototype_runs=48,simulator_runs=96)
+                               prototype_runs=run_count,simulator_runs=2*run_count,excluded_cells=excluded)
         if sign_projection>STAGE_CAPS["presigning"] or sim_projection>STAGE_CAPS["simulation"]:
             save(root/"projection-stage-cap-failure.json",projection_detail)
             raise RuntimeError("STOP: fixed signing or simulator stage projection exceeds approved cap")
-        project(root,"presigning",sign_projection+48*110+sim_allowance+7*60,projection_detail)
+        project(root,"presigning",sign_projection+run_count*110+sim_allowance+7*60,projection_detail)
         masters={}
-        for backend in VALIDATION:
+        for backend in validation_backends:
             for rep,file in enumerate(traces[backend]):
                 before=time.perf_counter()
                 data=corpus.build(json.loads(file.read_text()),backend,processes=2)
                 corpus.validate(data,primitive_checks=True)
                 masters[backend,rep]=corpus.write(data,root/"corpora"/f"{backend}-master-r{rep}.json")
                 account(root,stage_times,"presigning",time.perf_counter()-before)
-        project(root,"validation",48*110+sim_allowance+7*60,dict(prototype_runs=48,simulator_runs=96,
+        project(root,"validation",run_count*110+sim_allowance+7*60,dict(prototype_runs=run_count,simulator_runs=2*run_count,
             same_run_and_held_out=True,signing_projection=messages))
         state["status"]="validation"
         for cell_id,cell in enumerate(planned):
+            if cell not in eligible:continue
             for rep in range(3):
                 if remaining(root)<110+7*60:raise RuntimeError("STOP: insufficient remaining fixed-run/upload budget")
                 backend=cell["backend"];master=json.loads(masters[backend,rep].read_text())
@@ -246,7 +260,7 @@ def execute(root):
                     dispatcher_mapping=mapped,held_out_dispatcher_source="same validation-run structural/state; occupancy held out")
                 state["comparisons"].append(comparison);save(base/"comparison.json",comparison);save(root/"protocol.json",state)
         state["aggregates"]=[]
-        for cell in planned:
+        for cell in eligible:
             members=[c for c in state["comparisons"] if c["cell"]==cell]
             aggregate=dict(cell=cell,repetitions=len(members),passed=all(c["primary"]["passed"] for c in members),
                 aggregate_definition="arithmetic mean of per-repetition metrics; every repetition must pass",metrics={})
@@ -269,6 +283,10 @@ def execute(root):
             "| --- | --- | --- | --- | --- | --- | --- | --- |"]
         for c in state["cells"]:
             lines.append("| "+" | ".join(str(c[k]) for k in ("backend","k","policy","rho","rate","B_ref","B_cold","dispatcher_utilisation"))+" |")
+        lines += ["", "## Deviation 2 exclusions", ""]
+        for item in state.get("excluded_cells",[]):
+            c=item["cell"]
+            lines.append(str(c)+": "+item["reason"])
         lines += ["", "All per-repetition metrics, realised utilisation/cache-hit/job-mix values, primary bands,",
                   "held-out diagnostics and invariant violations are in protocol.json and each comparison.json.",
                   "Held-out band exceedances are diagnostic; they do not change nominal rho or primary thresholds."]
