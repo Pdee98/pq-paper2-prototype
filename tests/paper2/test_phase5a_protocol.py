@@ -4,11 +4,13 @@ from tests.paper2._provenance import setUpModule as provenance_setup, tearDownMo
 
 import csv
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
 import subprocess
 import sys
+import urllib.request
 from unittest.mock import patch
 
 from src.paper2.prototype import analysis,corpus,export,provision
@@ -18,15 +20,41 @@ from tests.paper2._support import config
 
 
 def setUpModule():
-    # The runner installs only cryptography in its unchanged build script.
-    # Bootstrap the pinned test dependency when its executable is unavailable.
-    if not export.actionlint_command():
-        subprocess.run([sys.executable,"-m","pip","install","--disable-pip-version-check",
-                        "actionlint-py=="+export.ACTIONLINT_PY_VERSION],check=True,timeout=180)
     provenance_setup()
 
 
 class Protocol(unittest.TestCase):
+    def setUp(self):
+        # Only the dedicated actionlint test exercises the external linter.
+        # Other exporter unit tests isolate that dependency; CLI exports keep
+        # their mandatory real actionlint gate unchanged.
+        if self._testMethodName!="test_generated_workflow_passes_actionlint_and_old_context_fails":
+            def receipt(path):
+                return dict(version="unit-test",package_version=None,returncode=0,stdout="",stderr="",
+                            workflow_sha256=analysis.sha256_file(Path(path)))
+            stub=patch.object(export,"lint_workflow",side_effect=receipt)
+            stub.start();self.addCleanup(stub.stop)
+
+    def test_runner_export_self_tests_do_not_install_or_download(self):
+        names=["test_export_manifest_baseline_and_payload_corruption","test_export_time_privacy_audit",
+               "test_export_fails_on_actionlint_findings","test_generated_workflow_passes_actionlint_and_old_context_fails"]
+        provenance=export._git_state()
+        result=unittest.TestResult()
+        with patch.dict(os.environ,{"GITHUB_ACTIONS":"true"}), \
+             patch.object(export,"_git_state",return_value=provenance), \
+             patch.object(export,"actionlint_command",side_effect=AssertionError("runner must not locate/install actionlint")), \
+             patch.object(subprocess,"run",side_effect=AssertionError("unexpected subprocess in runner export self-tests")), \
+             patch.object(urllib.request,"urlopen",side_effect=AssertionError("unexpected network download")), \
+             patch.object(urllib.request,"urlretrieve",side_effect=AssertionError("unexpected network download")), \
+             patch(__name__+".provenance_setup") as setup:
+            setUpModule();setup.assert_called_once_with()
+            for name in names:Protocol(name).run(result)
+        self.assertEqual(result.testsRun,len(names))
+        self.assertEqual(result.errors,[])
+        self.assertEqual(result.failures,[])
+        self.assertEqual([(case._testMethodName,reason) for case,reason in result.skipped],[(names[-1],
+            "actionlint is an export-time gate; already enforced before bundle export")])
+
     def test_liboqs_minimal_build_argument_and_installed_algorithm_record(self):
         with tempfile.TemporaryDirectory() as root:
             root=Path(root);native=root/"native";artifacts=root/"artifacts"
@@ -178,11 +206,18 @@ class Protocol(unittest.TestCase):
         self.assertNotIn("runner.temp",job_env)
         self.assertIn('echo "G3_ARTIFACTS=$RUNNER_TEMP/paper2-g3-artifacts" >> "$GITHUB_ENV"',text)
         self.assertIn("path: ${{ runner.temp }}/paper2-g3-artifacts/",text)
+        for log in ("local-tests.txt","native-build.log"):
+            self.assertIn('|| { tail -n 60 "$G3_ARTIFACTS/'+log+'"; exit 1; }',text)
         pins=json.loads((ROOT/"src/paper2/prototype/source_pins.json").read_text())
         for commit in pins["actions"].values():
             self.assertEqual(len(commit),40);self.assertIn("@"+commit,text)
 
     def test_generated_workflow_passes_actionlint_and_old_context_fails(self):
+        if os.environ.get("GITHUB_ACTIONS")=="true":
+            self.skipTest("actionlint is an export-time gate; already enforced before bundle export")
+        if not export.actionlint_command():
+            subprocess.run([sys.executable,"-m","pip","install","--disable-pip-version-check",
+                            "actionlint-py=="+export.ACTIONLINT_PY_VERSION],check=True,timeout=180)
         with tempfile.TemporaryDirectory() as root:
             root=Path(root);manifest=export.export(root/"bundle",allow_dirty=True)
             receipt=manifest["actionlint"]

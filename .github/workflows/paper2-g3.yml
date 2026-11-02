@@ -31,7 +31,7 @@ jobs:
           python -m src.paper2.prototype.runner --record-start "$G3_ARTIFACTS"
           cp BUNDLE_MANIFEST.json BUNDLE_MANIFEST.sha256 "$G3_ARTIFACTS/"
           cp src/paper2/prototype/source_pins.json "$G3_ARTIFACTS/"
-          timeout --signal=TERM --kill-after=10s 40m bash -euo pipefail <<'BUILD'
+          timeout --signal=TERM --kill-after=10s 40m bash -euo pipefail <<'BUILD' || { tail -n 60 "$G3_ARTIFACTS/native-build.log"; exit 1; }
           python -m pip install --disable-pip-version-check cryptography==45.0.7
           python -m src.paper2.prototype.runner --record-host "$G3_ARTIFACTS"
           python -m src.paper2.prototype.export --verify-bundle .
@@ -40,7 +40,7 @@ jobs:
           python -m src.paper2.prototype.provision --stage build --root "$G3_NATIVE" --artifacts "$G3_ARTIFACTS" --execute
           BUILD
           timeout --signal=TERM --kill-after=10s 15m python -m src.paper2.prototype.provision --stage conformance --root "$G3_NATIVE" --artifacts "$G3_ARTIFACTS" --execute
-          python -m unittest discover -s tests/paper2 -p 'test_phase5a*.py' -v > "$G3_ARTIFACTS/local-tests.txt" 2>&1
+          python -m unittest discover -s tests/paper2 -p 'test_phase5a*.py' -v > "$G3_ARTIFACTS/local-tests.txt" 2>&1 || { tail -n 60 "$G3_ARTIFACTS/local-tests.txt"; exit 1; }
           python -m src.paper2.prototype.runner --output "$G3_ARTIFACTS" --execute
           G3
       - name: Hash all artifacts, including partial failures
