@@ -91,14 +91,22 @@ class Prototype(unittest.TestCase):
             jobsfile=e.parent/"jobs.csv"
             with jobsfile.open(newline="") as f:jobs=list(csv.DictReader(f))
             selected=next(r for r in rows if r["event"]=="start" and r["job_class"]==job_class)
-            # Insert 1 ms of unexplained idle time after a dispatch. The original
-            # busy span ends before the delayed start: it cannot excuse this gap.
-            selected["t"]=str(float(selected["t"])+.001)
-            selected["monotonic_ns"]=str(int(selected["monotonic_ns"])+1000000)
+            # A fixed 1 ms mutation can fit inside a slow host's busy span.
+            # Exceed even the sum of ALL physical services and busy spans, an
+            # upper bound on residual/ahead work plus allowed dispatcher overlap.
+            meta=json.loads(m.read_text())
+            spans=json.loads((e.parent/meta["prototype"]["spans"]["path"]).read_text())
+            known=sum((json.loads(r["record"])["service_time"] or 0) for r in jobs)
+            known+=sum(s["end_t"]-s["start_t"] for s in spans)
+            delta_ns=int((known+.001)*1e9)+1;delta=delta_ns/1e9
+            for row in rows:
+                if row["job_id"]==selected["job_id"] and row["event"] in ("start","end"):
+                    row["t"]=str(float(row["t"])+delta)
+                    row["monotonic_ns"]=str(int(row["monotonic_ns"])+delta_ns)
             for r in jobs:
                 j=json.loads(r["record"])
                 if j["job_id"]==selected["job_id"]:
-                    j["start_t"]+=.001;j["service_time"]-=.001;r["record"]=json.dumps(j)
+                    j["start_t"]+=delta;j["end_t"]+=delta;r["record"]=json.dumps(j)
             with e.open("w",newline="") as f:
                 w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(rows)
             with jobsfile.open("w",newline="") as f:

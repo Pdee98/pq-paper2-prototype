@@ -11,7 +11,7 @@ import subprocess
 import sys
 from unittest.mock import patch
 
-from src.paper2.prototype import analysis,corpus,export
+from src.paper2.prototype import analysis,corpus,export,provision
 from src.paper2.model.service_times import ROOT
 from src.paper2.verify.invariants import check
 from tests.paper2._support import config
@@ -27,6 +27,42 @@ def setUpModule():
 
 
 class Protocol(unittest.TestCase):
+    def test_liboqs_minimal_build_argument_and_installed_algorithm_record(self):
+        with tempfile.TemporaryDirectory() as root:
+            root=Path(root);native=root/"native";artifacts=root/"artifacts"
+            header=native/"liboqs/include/oqs/oqsconfig.h";header.parent.mkdir(parents=True)
+            enabled=["#define "+name+" 1" for name in provision.REQUIRED_ALGORITHMS]
+            header.write_text("\n".join(enabled)+"\n")
+            with patch.object(provision,"fetch",side_effect=[root/"openssl-source",root/"oqs-source"]),patch.object(provision,"command") as commands:
+                provision.build(native,artifacts)
+            cmake=next(call.args[0] for call in commands.call_args_list if call.args[0][:2]==["cmake","-S"])
+            values=[v for v in cmake if isinstance(v,str) and v.startswith("-DOQS_MINIMAL_BUILD=")]
+            self.assertEqual(values,["-DOQS_MINIMAL_BUILD=SIG_ml_dsa_44;SIG_STFL_xmss_sha256_h10"])
+            self.assertEqual(json.loads((artifacts/"native-build.json").read_text())["enabled_algorithm_lines"],enabled)
+
+    def test_installed_header_requires_both_enabled_algorithms(self):
+        with tempfile.TemporaryDirectory() as root:
+            header=Path(root)/"oqsconfig.h"
+            for missing in provision.REQUIRED_ALGORITHMS:
+                with self.subTest(missing=missing):
+                    header.write_text("\n".join("#define "+name+" 1" for name in provision.REQUIRED_ALGORITHMS if name!=missing))
+                    with self.assertRaisesRegex(ValueError,"liboqs build is missing required algorithms: "+missing):
+                        provision.require_algorithms(header)
+            header.write_text("\n".join("#define "+name+" 0" for name in provision.REQUIRED_ALGORITHMS))
+            with self.assertRaisesRegex(ValueError,"missing required algorithms"):
+                provision.require_algorithms(header)
+
+    def test_disabled_xmss_kat_output_has_explicit_error_before_digest(self):
+        with tempfile.TemporaryDirectory() as root:
+            root=Path(root)
+            (root/"native-build.json").write_text(json.dumps(dict(openssl_source=str(root/"openssl"),
+                liboqs_source=str(root/"oqs"),liboqs_build=str(root/"build"))))
+            output=b"[sig_stfl_kat] XMSS-SHA2_10_256 was not enabled at compile-time.\n"
+            with patch.object(provision.subprocess,"check_output",return_value=output):
+                with self.assertRaisesRegex(ValueError,"XMSS KAT algorithm was not enabled at compile-time"):
+                    provision.conformance(root)
+            self.assertEqual((root/"xmss-kat-output.txt").read_bytes(),output)
+
     def test_amended_reference_and_prevalidation_dispatcher_guard(self):
         # m_a=2, m_t=4, m_s=128 => warm demand 3, cold demand 7.
         refs=analysis.references(dict(admission=2,block_tx=4,block_sig=128),{1:10,2:15},.1)

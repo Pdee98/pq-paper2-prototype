@@ -32,6 +32,18 @@ def fetch(pin,root):
     return next(p for p in directory.iterdir() if p.is_dir())
 
 
+REQUIRED_ALGORITHMS=("OQS_ENABLE_SIG_STFL_xmss_sha256_h10","OQS_ENABLE_SIG_ml_dsa_44")
+
+
+def require_algorithms(header):
+    try:lines={line.strip() for line in Path(header).read_text().splitlines()}
+    except OSError as exc:
+        raise ValueError("liboqs build is missing required algorithms: "+", ".join(REQUIRED_ALGORITHMS)) from exc
+    missing=[name for name in REQUIRED_ALGORITHMS if "#define "+name+" 1" not in lines]
+    if missing:raise ValueError("liboqs build is missing required algorithms: "+", ".join(missing))
+    return ["#define "+name+" 1" for name in REQUIRED_ALGORITHMS]
+
+
 def build(root,artifacts):
     root=Path(root).resolve();root.mkdir(parents=True,exist_ok=True)
     artifacts=Path(artifacts);artifacts.mkdir(parents=True,exist_ok=True)
@@ -45,12 +57,14 @@ def build(root,artifacts):
     command(["cmake","-S",oqs,"-B",builddir,"-GNinja","-DCMAKE_BUILD_TYPE=Release","-DBUILD_SHARED_LIBS=ON",
         "-DOQS_ENABLE_SIG_STFL_XMSS=ON","-DOQS_ENABLE_SIG_STFL_LMS=OFF",
         "-DOQS_HAZARDOUS_EXPERIMENTAL_ENABLE_SIG_STFL_KEY_SIG_GEN=ON",
-        "-DOQS_MINIMAL_BUILD=SIG_ml_dsa_44",f"-DOPENSSL_ROOT_DIR={prefix}",f"-DCMAKE_INSTALL_PREFIX={install}",
+        "-DOQS_MINIMAL_BUILD=SIG_ml_dsa_44;SIG_STFL_xmss_sha256_h10",f"-DOPENSSL_ROOT_DIR={prefix}",f"-DCMAKE_INSTALL_PREFIX={install}",
         "-DCMAKE_INSTALL_LIBDIR=lib"],root,log)
     command(["cmake","--build",builddir,"--parallel","3","--target","oqs","kat_sig_stfl"],root,log)
     command(["cmake","--install",builddir],root,log)
+    enabled=require_algorithms(install/"include/oqs/oqsconfig.h")
     result=dict(openssl_source=str(openssl),liboqs_source=str(oqs),liboqs_build=str(builddir),
-        openssl_prefix=str(prefix),liboqs_prefix=str(install),pins=pins,elapsed=time.monotonic()-start)
+        openssl_prefix=str(prefix),liboqs_prefix=str(install),pins=pins,elapsed=time.monotonic()-start,
+        enabled_algorithm_lines=enabled)
     (artifacts/"native-build.json").write_bytes(json.dumps(result,indent=2).encode()+b"\n")
 
 
@@ -62,6 +76,8 @@ def conformance(artifacts):
     args=[str(Path(data["liboqs_build"])/"tests/kat_sig_stfl"),"XMSS-SHA2_10_256",str(kat)]
     raw=subprocess.check_output(args,cwd=oqs,timeout=600,stderr=subprocess.STDOUT).replace(b"\r\n",b"\n")
     (artifacts/"xmss-kat-output.txt").write_bytes(raw)
+    if b"was not enabled at compile-time" in raw:
+        raise ValueError("XMSS KAT algorithm was not enabled at compile-time")
     expected=json.loads((oqs/"tests/KATs/sig_stfl/kats.json").read_text())["XMSS-SHA2_10_256"]
     if hashlib.sha256(raw).hexdigest()!=expected:raise ValueError("shipped XMSS KAT digest mismatch")
     records.append(dict(backend="xmss",kind="liboqs shipped XMSS KAT",passed=True,
