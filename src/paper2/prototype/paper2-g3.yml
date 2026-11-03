@@ -28,6 +28,7 @@ jobs:
           export LD_LIBRARY_PATH="$G3_NATIVE/openssl/lib:$G3_NATIVE/liboqs/lib:${LD_LIBRARY_PATH:-}"
           export OPENSSL_MODULES="$G3_NATIVE/openssl/lib/ossl-modules"
           timeout --signal=TERM --kill-after=10s 280m bash -euo pipefail <<'G3'
+          python -m src.paper2.prototype.runner --require-validation-caps
           python -m src.paper2.prototype.runner --record-start "$G3_ARTIFACTS"
           cp BUNDLE_MANIFEST.json BUNDLE_MANIFEST.sha256 "$G3_ARTIFACTS/"
           cp research/paper2/phase5/RUNTIME_PLAN.md src/paper2/prototype/source_pins.json "$G3_ARTIFACTS/"
@@ -43,21 +44,25 @@ jobs:
           python -m unittest discover -s tests/paper2 -p 'test_phase5a*.py' -v > "$G3_ARTIFACTS/local-tests.txt" 2>&1 || { tail -n 60 "$G3_ARTIFACTS/local-tests.txt"; exit 1; }
           python -m src.paper2.prototype.runner --output "$G3_ARTIFACTS" --execute
           G3
+      - name: Audit public corpus before any upload
+        id: corpus_audit
+        if: always()
+        run: python -m src.paper2.prototype.public_corpus "$G3_ARTIFACTS"
       - name: Hash all artifacts, including partial failures
         if: always()
         timeout-minutes: 2
         run: python -m src.paper2.prototype.runner --hash-artifacts "$G3_ARTIFACTS"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
+        if: always() && steps.corpus_audit.outcome == 'success'
         timeout-minutes: 8
         with:
           name: paper2-g3-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/paper2-g3-artifacts/
           if-no-files-found: error
           retention-days: 30
-      - name: Upload signature-free replay inputs
+      - name: Upload audited public replay inputs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
+        if: always() && steps.corpus_audit.outcome == 'success'
         timeout-minutes: 8
         with:
           name: paper2-g3-replay-inputs-${{ github.run_id }}

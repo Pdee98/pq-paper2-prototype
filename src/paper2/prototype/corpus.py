@@ -104,7 +104,7 @@ def sign_messages(backend, messages, processes=1):
         count=len(messages),processes=processes,leaf_rule="one key/batch; indices 0..count-1; max 512 per H10 key")
 
 
-def build(workload, backend="ed25519", processes=1, master=None):
+def build(workload, backend="ed25519", processes=1, master=None, primitive_checks=False):
     """Build a public corpus. Optional master reuses signed transaction prefixes."""
     import copy
     w=copy.deepcopy(workload)
@@ -135,7 +135,6 @@ def build(workload, backend="ed25519", processes=1, master=None):
         entry["cache_key"]=cache_key(context,bytes.fromhex(entry["public_key_hex"]),
             bytes.fromhex(entry["payload_hex"]),tx["nonce"],bytes.fromhex(entry["signature_hex"]))
         tx.update(public_key_id=entry["key_id"],signature_id=hashlib.sha256(bytes.fromhex(entry["signature_hex"])).hexdigest())
-        validate_entry(entry,context,tx)
     # Admission dictionaries may carry their own copies of metadata in generated workloads.
     for a in w["admissions"]:
         arrival=a["arrival_t"];a.update(w["transactions"][a["tx_id"]]);a["arrival_t"]=arrival
@@ -152,7 +151,7 @@ def build(workload, backend="ed25519", processes=1, master=None):
     result=dict(version="paper2-public-corpus-v1",backend=backend,context=context,workload=w,
         transactions=entries,blocks=blocks,block_objects=objects,
         presigning=dict(transactions=tx_ledger,blocks=block_ledger))
-    validate(result)
+    validate(result,primitive_checks=primitive_checks)
     return result
 
 

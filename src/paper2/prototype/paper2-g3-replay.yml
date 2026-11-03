@@ -6,6 +6,12 @@ on:
         description: ARM measurement workflow run ID
         required: true
         type: string
+      source_kind:
+        description: Validation or excluded diagnostic evidence
+        required: true
+        default: validation
+        type: choice
+        options: [validation, diagnostic]
 permissions:
   contents: read
   actions: read
@@ -19,6 +25,7 @@ jobs:
     env:
       PYTHONDONTWRITEBYTECODE: '1'
       SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+      REPLAY_MODULE: ${{ inputs.source_kind == 'diagnostic' && 'src.paper2.prototype.diagnostic' || 'src.paper2.prototype.replay' }}
     steps:
       - name: Set runner-temp paths
         run: echo "PYTHONPYCACHEPREFIX=$RUNNER_TEMP/paper2-replay-pycache" >> "$GITHUB_ENV"
@@ -28,13 +35,13 @@ jobs:
           python-version: '3.13'
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: paper2-g3-replay-inputs-${{ inputs.source_run_id }}
+          name: paper2-g3-${{ inputs.source_kind == 'diagnostic' && 'diagnostic' || 'replay' }}-inputs-${{ inputs.source_run_id }}
           run-id: ${{ inputs.source_run_id }}
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/inputs
       - name: Verify all inputs and generate exact eligible-run matrix
         id: inputs
-        run: python -m src.paper2.prototype.replay prepare --inputs "$RUNNER_TEMP/inputs" --source-run-id "$SOURCE_RUN_ID"
+        run: python -m "$REPLAY_MODULE" prepare --inputs "$RUNNER_TEMP/inputs" --source-run-id "$SOURCE_RUN_ID"
   matrix:
     needs: prepare
     runs-on: ubuntu-24.04
@@ -46,6 +53,7 @@ jobs:
     env:
       PYTHONDONTWRITEBYTECODE: '1'
       SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+      REPLAY_MODULE: ${{ inputs.source_kind == 'diagnostic' && 'src.paper2.prototype.diagnostic' || 'src.paper2.prototype.replay' }}
       REPLAY_RUN_ID: ${{ matrix.run_id }}
     steps:
       - name: Set runner-temp paths
@@ -58,12 +66,12 @@ jobs:
           python-version: '3.13'
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: paper2-g3-replay-inputs-${{ inputs.source_run_id }}
+          name: paper2-g3-${{ inputs.source_kind == 'diagnostic' && 'diagnostic' || 'replay' }}-inputs-${{ inputs.source_run_id }}
           run-id: ${{ inputs.source_run_id }}
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/inputs
       - name: Replay primary and held-out inputs, check invariants and compare
-        run: python -m src.paper2.prototype.replay run --inputs "$RUNNER_TEMP/inputs" --source-run-id "$SOURCE_RUN_ID" --run-id "$REPLAY_RUN_ID" --output "$RUNNER_TEMP/result"
+        run: python -m "$REPLAY_MODULE" run --inputs "$RUNNER_TEMP/inputs" --source-run-id "$SOURCE_RUN_ID" --run-id "$REPLAY_RUN_ID" --output "$RUNNER_TEMP/result"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -79,6 +87,7 @@ jobs:
     env:
       PYTHONDONTWRITEBYTECODE: '1'
       SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+      REPLAY_MODULE: ${{ inputs.source_kind == 'diagnostic' && 'src.paper2.prototype.diagnostic' || 'src.paper2.prototype.replay' }}
     steps:
       - name: Set runner-temp paths
         run: echo "PYTHONPYCACHEPREFIX=$RUNNER_TEMP/paper2-replay-pycache" >> "$GITHUB_ENV"
@@ -91,7 +100,7 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         continue-on-error: true
         with:
-          name: paper2-g3-replay-inputs-${{ inputs.source_run_id }}
+          name: paper2-g3-${{ inputs.source_kind == 'diagnostic' && 'diagnostic' || 'replay' }}-inputs-${{ inputs.source_run_id }}
           run-id: ${{ inputs.source_run_id }}
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/inputs
@@ -101,7 +110,7 @@ jobs:
           pattern: paper2-g3-replay-result-${{ github.run_id }}-*
           path: ${{ runner.temp }}/results
       - name: Gather every repetition; missing or corrupt results fail G3
-        run: python -m src.paper2.prototype.replay gather --inputs "$RUNNER_TEMP/inputs" --source-run-id "$SOURCE_RUN_ID" --results "$RUNNER_TEMP/results" --output "$RUNNER_TEMP/g3-report"
+        run: python -m "$REPLAY_MODULE" gather --inputs "$RUNNER_TEMP/inputs" --source-run-id "$SOURCE_RUN_ID" --results "$RUNNER_TEMP/results" --output "$RUNNER_TEMP/g3-report"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

@@ -675,19 +675,21 @@ def run_model(config, *, model_type=Model) -> tuple[Path, Path]:
         model.run()
         summary_file.write_text(json.dumps(model.summary.finish(),separators=(",",":"),allow_nan=False),encoding="utf-8")
     else:
-        with log.open("x", encoding="utf-8", newline="", buffering=1024*1024) as stream:
-            writer = csv.writer(stream)
+        with log.open("x", encoding="utf-8", newline="", buffering=8*1024*1024) as stream:
+            writer = model.csv_writer(stream) if hasattr(model, "csv_writer") else csv.writer(stream)
             writer.writerow(getattr(model, "event_fields", EVENT_FIELDS))
             model.event_writer = model.wrap_writer(writer) if hasattr(model, "wrap_writer") else writer
             model.run()
             if hasattr(model.event_writer, "flush"):
                 model.event_writer.flush()
-        with job_file.open("x", encoding="utf-8", newline="", buffering=1024*1024) as stream:
-            writer = csv.writer(stream)
+            if hasattr(writer, "flush"): writer.flush()
+        with job_file.open("x", encoding="utf-8", newline="", buffering=8*1024*1024) as stream:
+            writer = model.csv_writer(stream) if hasattr(model, "csv_writer") else csv.writer(stream)
             writer.writerow(("job_id","record"))
             for job in model.jobs.values():
                 writer.writerow((job.job_id,json.dumps(vars(job),
                     ensure_ascii=True, separators=(",", ":"), allow_nan=False)))
+            if hasattr(writer, "flush"): writer.flush()
     provenance = dict(schema_version=4, config=model.config, git=git,
         seed_derivation=SEED_VERSION, job_draw_version=JOB_DRAW_VERSION,
         sample_index_mapping="SHA256 unsigned integer modulo selected sample count",
@@ -708,7 +710,10 @@ def run_model(config, *, model_type=Model) -> tuple[Path, Path]:
             mean=sum(model.choose_overheads) / len(model.choose_overheads) if model.choose_overheads else 0))
     if hasattr(model, "extra_manifest"):
         provenance.update(model.extra_manifest(directory))
-    with manifest.open("x", encoding="utf-8") as stream:
-        stream.write(json.dumps(provenance, separators=(",", ":"), allow_nan=False))
-        stream.write("\n")
+    if hasattr(model, "write_manifest"):
+        model.write_manifest(manifest, provenance)
+    else:
+        with manifest.open("x", encoding="utf-8") as stream:
+            stream.write(json.dumps(provenance, separators=(",", ":"), allow_nan=False))
+            stream.write("\n")
     return (log if model.output == "full" else summary_file), manifest

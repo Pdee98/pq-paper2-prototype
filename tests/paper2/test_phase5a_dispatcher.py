@@ -120,6 +120,9 @@ class Dispatcher(unittest.TestCase):
                 self.assertEqual([(r["job_id"],r["worker_id"]) for r in starts[:2]],
                                  [("admission:0","0"),("admission:1","1")])
             self.assertEqual(decisions(logs[0]),decisions(logs[1]))
+            self.assertEqual(logs[0].read_bytes(),logs[1].read_bytes())
+            for name in ("jobs.csv","dispatcher_spans.json"):
+                self.assertEqual((logs[0].parent/name).read_bytes(),(logs[1].parent/name).read_bytes())
             sample=analysis.samples_from_jobs(logs[1].parent/"jobs.csv",root/"samples.csv","sleep","test")
             se,sm=analysis.paired(dict(data["workload"],output_dir=str(root/"replay")),cp,sample,"sleep",0,0)
             self.assertEqual(check(se,se.parent/"jobs.csv",sm),[])

@@ -13,6 +13,8 @@ from src.paper2.model.service_times import JOB_CLASSES, sha256_file
 from src.paper2.state import Ledger
 from .corpus import cache_key, signed_parts, validate_entry, validate
 from .workers import Workers
+from .progress import Progress, phase_times, read_progress, peak_rss
+from .serialisation import CSVWriter, write_json
 
 PROTOTYPE_FIELDS=("monotonic_ns","scheduled_t","dispatcher_span_id","send_ns","receive_ns",
                   "worker_start_ns","worker_end_ns","occupancy_ns","primitive_ns","dispatch_to_start_ns",
@@ -41,10 +43,19 @@ class LegacyRealtimeModel(Model):
     """Pre-Deviation-2 implementation, retained for decision equivalence tests."""
     event_fields=EVENT_FIELDS+PROTOTYPE_FIELDS
 
-    def __init__(self,config,corpus_path,sleep_seconds=0,stop_t=None):
+    def __init__(self,config,corpus_path,sleep_seconds=0,stop_t=None,validated_sha256=None,progress=None):
         self.corpus_path=Path(corpus_path).resolve()
-        self.corpus=json.loads(self.corpus_path.read_text(encoding="utf-8"))
-        validate(self.corpus)
+        self.progress=progress
+        raw=self.corpus_path.read_bytes()
+        if validated_sha256 is not None:
+            import hashlib
+            if hashlib.sha256(raw).hexdigest()!=validated_sha256:raise ValueError("validated corpus SHA-256 mismatch")
+        self.corpus=json.loads(raw)
+        if validated_sha256 is None:validate(self.corpus)
+        else:
+            for field in ("transactions","admissions","blocks","context"):
+                if config.get(field)!=self.corpus["workload"].get(field):raise ValueError("binding differs from validated corpus: "+field)
+        self.validated_sha256=validated_sha256
         self.costs=[];self.spans=[];self.span_id="";self.extra_row={};self.epoch=None
         self.ipc_ns=0;self.idle_ns=0;self.stop_t=stop_t;self.sleep_seconds=sleep_seconds
         self.released=[];self.dispatch_ns={};self.incomplete=False
@@ -102,6 +113,11 @@ class LegacyRealtimeModel(Model):
         self.costs.append(dict(kind="structural",items=1,duration_ns=time.monotonic_ns()-begin))
         super()._admit_ready(job)
 
+    def _admit_state(self,job):
+        super()._admit_state(job)
+        if self.progress and self.admission_checks[-1]["passed"]:
+            self.progress.advance(self.t);self.progress.counts["admitted"]+=1
+
     def _block_ready(self,bid,jobs,structurally_valid):
         begin=time.monotonic_ns()
         for tx in self.block_transactions[bid]:
@@ -153,12 +169,22 @@ class LegacyRealtimeModel(Model):
     def run(self):
         publics={bytes.fromhex(e["public_key_hex"]) for group in ("transactions","blocks")
                  for e in self.corpus[group].values()}
+        if self.progress:self.progress.phase("prototype_window_start", event_rows=self.row_count)
         self.workers=Workers(self.pool.k,self.corpus["backend"],list(publics),self.sleep_seconds)
+        if self.progress:self.progress.phase("workers_ready", workers=self.pool.k)
         self.epoch=time.monotonic_ns()
+        if self.progress:self.progress.phase("epoch", epoch_ns=self.epoch)
+        warmup_done=measurement_done=False
         self.scheduled_t=0
         try:
             while self.events or self.pool.running:
                 now=(time.monotonic_ns()-self.epoch)/1e9
+                if self.progress:
+                    self.progress.advance(min(now,self.stop_t) if self.stop_t is not None else now)
+                    if now>=30 and not warmup_done:
+                        self.progress.phase("warmup_end", event_rows=self.row_count);warmup_done=True
+                    if now>=90 and not measurement_done:
+                        self.progress.phase("measurement_end", event_rows=self.row_count);measurement_done=True
                 if self.stop_t is not None and now>self.stop_t:
                     self.incomplete=True;break
                 poll_begin=time.monotonic_ns()
@@ -179,13 +205,16 @@ class LegacyRealtimeModel(Model):
             self.finish_ns=time.monotonic_ns()
             if not self.incomplete and (self.pool.running or self.pool.waiting):
                 raise RuntimeError("unfinished worker jobs")
+            if self.progress:self.progress.phase("drain_end", drain_complete=not self.incomplete,
+                q_admission=self.pool.counts()[0],q_block=self.pool.counts()[1],running=len(self.pool.running),event_rows=self.row_count)
             if not self.incomplete:self.workers.handshake("after")
         finally:
             self.workers.close()
 
     def extra_manifest(self,directory):
         spans=directory/"dispatcher_spans.json"
-        spans.write_bytes(json.dumps(self.spans,separators=(",",":")).encode()+b"\n")
+        if isinstance(self,RealtimeModel):write_json(spans,self.spans)
+        else:spans.write_bytes(json.dumps(self.spans,separators=(",",":")).encode()+b"\n")
         active=max(0,self.finish_ns-self.epoch-self.idle_ns)
         structural=sum(c["duration_ns"] for c in self.costs if c["kind"]=="structural")
         state=sum(c["duration_ns"] for c in self.costs if c["kind"]=="state")
@@ -226,8 +255,8 @@ class RealtimeModel(LegacyRealtimeModel):
     """Same decisions/transport, prepared bytes and deferred schema-v4 records."""
     MAX_EVENT_ROWS=8_000_000
 
-    def __init__(self,config,corpus_path,sleep_seconds=0,stop_t=None):
-        super().__init__(config,corpus_path,sleep_seconds,stop_t)
+    def __init__(self,config,corpus_path,sleep_seconds=0,stop_t=None,validated_sha256=None,progress=None):
+        super().__init__(config,corpus_path,sleep_seconds,stop_t,validated_sha256,progress)
         # The corpus has already been checked against the frozen wire objects.
         # Bind every normalized internal transaction (including admission
         # overrides) to it ONCE, before the epoch. Model never mutates these.
@@ -238,7 +267,7 @@ class RealtimeModel(LegacyRealtimeModel):
         for _,_,_,callback,args in self.events:
             if getattr(callback,"__func__",None) is Model._admission:txs.append(args[1])
         for tx in txs:
-            validate_entry(self.corpus["transactions"][tx["tx_id"]],self.corpus["context"],tx)
+            if validated_sha256 is None:validate_entry(self.corpus["transactions"][tx["tx_id"]],self.corpus["context"],tx)
             self.validated_tx.add(id(tx))
         # Block composition/signature labels must also match the prepared corpus.
         expected={b["block_id"]:b for b in self.corpus["workload"]["blocks"]}
@@ -249,6 +278,14 @@ class RealtimeModel(LegacyRealtimeModel):
         logical=sum(len(b["tx_ids"])+1 for b in config.get("blocks",[]))
         self.event_capacity=min(self.MAX_EVENT_ROWS,max(1024,24*(len(config.get("admissions",[]))+logical)))
         self.block_snapshots={};self.job_snapshots={}
+
+    csv_writer=staticmethod(CSVWriter)
+
+    def write_manifest(self,path,value):write_json(path,value,exclusive=True)
+
+    def run(self):
+        super().run()
+        if self.progress:self.progress.phase("serialisation_start", event_rows=self.row_count,jobs=len(self.jobs))
 
     def wrap_writer(self,writer):return BufferedEventWriter(writer,self.event_capacity,self.serialize_event)
 
@@ -320,6 +357,7 @@ class RealtimeModel(LegacyRealtimeModel):
         if self.event_writer is None:self.rows.append(dict(zip(self.event_fields,self.serialize_event(record))))
         else:self.event_writer.writerow(record)
         self.row_count+=1
+        if self.progress:self.progress.event(self.t,event,job.job_class if job else "",(qa,qb))
 
     def serialize_event(self,record):
         seq,t,event,qa,qb,busy,job,block,extra,now,scheduled,span=record
@@ -337,11 +375,23 @@ class RealtimeModel(LegacyRealtimeModel):
         result=super().extra_manifest(directory)
         result["prototype"]["event_buffer"]=dict(capacity=self.event_capacity,rows=self.row_count,
             serialization="after finish_ns and drain; fixed-width immutable snapshots; overflow aborts")
-        result["prototype"]["preparation"]=dict(validation="before epoch against frozen wire objects",
+        result["prototype"]["preparation"]=dict(validation="validated corpus SHA-256 binding" if self.validated_sha256 else "before epoch against frozen wire objects",
             cache_keys="validated corpus keys",payloads="decoded before epoch",
             online_structural_check="membership of immutable, prevalidated normalized transactions")
         return result
 
 
-def run(config,corpus_path,*,sleep_seconds=0,stop_t=None):
-    return run_model(config,model_type=lambda c:RealtimeModel(c,corpus_path,sleep_seconds,stop_t))
+def run(config,corpus_path,*,sleep_seconds=0,stop_t=None,validated_sha256=None):
+    progress=Progress(config["output_dir"]) if config.get("output_dir") else None
+    holder=[]
+    def create(c):
+        model=RealtimeModel(c,corpus_path,sleep_seconds,stop_t,validated_sha256,progress);holder.append(model);return model
+    try:
+        e,m=run_model(config,model_type=create)
+        if progress:
+            model=holder[0]
+            progress.phase("serialisation_end",event_rows=model.row_count,jobs=len(model.jobs),peak_parent_rss_bytes=peak_rss())
+            progress.phase("exit",drain_complete=not model.incomplete,event_rows=model.row_count,jobs=len(model.jobs))
+        return e,m
+    finally:
+        if progress:progress.close()

@@ -63,7 +63,8 @@ def calibrate_once(corpus_path,k,output,replicate,warmup=2,measurement=10):
         config=dict(corpus["workload"],k=k,policy=dict(name=policy),q_max=10000,
             cache=dict(capacity=4096,ttl=2*corpus["workload"]["block_period"]),
             pool=dict(enabled=True,capacity_bytes=16*1024*1024),output_dir=str(output/("dispatcher-"+policy)))
-        e,m=run(config,corpus_path)
+        from src.paper2.model.service_times import sha256_file
+        e,m=run(config,corpus_path,validated_sha256=sha256_file(Path(corpus_path)))
         violations=check(e,e.parent/"jobs.csv",m)
         if violations:raise ValueError("calibration prototype invariants failed: "+str(violations[:3]))
         meta=json.loads(m.read_text());n=len(corpus["workload"]["admissions"]);mapped=costs(meta)

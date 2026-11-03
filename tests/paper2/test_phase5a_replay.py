@@ -61,6 +61,7 @@ class Replay(unittest.TestCase):
             result=replay.execute(self.inputs,"cell0-r0",root/"execution","123")
             self.assertNotIn("execution_error",result)
             self.assertEqual(result["seeds"],info["seeds"])
+            self.assertEqual(result["prototype"]["violations"],[])
             self.assertEqual(result["primary"]["violations"],[])
             self.assertEqual(result["held_out"]["violations"],[])
             report=replay.gather(self.inputs,root/"execution",root/"gather","123")
@@ -86,6 +87,16 @@ class Replay(unittest.TestCase):
         for key in ("private"+"_key","signing_state","presigning","leaf_index","signature_hex"):
             with self.subTest(key=key),self.assertRaisesRegex(ValueError,"private material|signing state"):
                 replay.audit_value({key:"test"})
+
+    def test_replay_rejects_corrupt_public_corpus_before_checker(self):
+        import shutil
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td);packet=root/"packet";shutil.copytree(self.inputs/"cell0-r0",packet)
+            path=packet/"prototype/public-corpus.zip";path.write_bytes(path.read_bytes()+b"corrupt")
+            replay.seal(packet,"REPLAY_MANIFEST.json")
+            with patch.object(replay,"check",side_effect=AssertionError("checker ran before hashes")):
+                with self.assertRaisesRegex(ValueError,"corpus archive SHA-256 mismatch"):
+                    replay.postprocess_prototype(packet,root/"check")
 
     def records(self):
         base={name:1.0 for name in analysis.BANDS};base["complete"]=True
@@ -140,7 +151,9 @@ class Replay(unittest.TestCase):
             self.assertEqual(data["held_out"]["violations"],[])
 
     def test_workflow_split_and_arm_projection(self):
-        self.assertEqual(runner.arm_remaining_projection(2221,30),5941)
+        with self.assertRaisesRegex(RuntimeError,"caps unset"):
+            runner.arm_remaining_projection(2221,30)
+        self.assertEqual(runner.arm_remaining_projection(2221,30,dict(preparation=10,serialisation=20)),6841)
         self.assertNotIn("simulation",runner.STAGE_CAPS)
         text=(ROOT/"src/paper2/prototype/paper2-g3-replay.yml").read_text()
         for expected in ("workflow_dispatch:","source_run_id:","actions: read","max-parallel: 20", "fail-fast: false", "if: always()", "github-token: ${{ github.token }}"):

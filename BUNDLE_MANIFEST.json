@@ -1,6 +1,6 @@
 {
   "schema": "paper2-export-v1",
-  "source_commit": "ff3f74ce45c376e39bb929de441006e913476d75",
+  "source_commit": "b985312a0f84d1957b25cd270bf87650d558ff27",
   "source_dirty": false,
   "baseline_sha256": "83b4a814f99c851c0b5fa4c44e6c2999ceff5f751f70f387e9dac03ec03079f3",
   "baseline_path": "PROTECTED_SHA256.txt",
@@ -47,16 +47,24 @@
     "returncode": 0,
     "stdout": "",
     "stderr": "",
-    "workflow_sha256": "db5527417337f7b50e61ceddca8e19b22dd15bd0ff5f2cb047cd0990c1e8f866"
+    "workflow_sha256": "10e39943b2db762bd62861def8ea62495a890ce333a1b6bad51e1649ae8f19ff"
   },
   "actionlint_workflows": {
+    "paper2-g3-diagnostic.yml": {
+      "version": "1.7.12",
+      "package_version": "1.7.12.25",
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "",
+      "workflow_sha256": "230f62cae01c5d55bc7ba300f06bfa3ec3c2ccd95f403a02d1c4c9eff3d7f6e4"
+    },
     "paper2-g3-replay.yml": {
       "version": "1.7.12",
       "package_version": "1.7.12.25",
       "returncode": 0,
       "stdout": "",
       "stderr": "",
-      "workflow_sha256": "7c9f1622e971b669887c02179b59549b18b217871fc76a51a4d846cdb7c6db47"
+      "workflow_sha256": "4005ec96de45a9d0b788ebd4887ca5a1e476116622c22cba2a36f0f812efa555"
     },
     "paper2-g3.yml": {
       "version": "1.7.12",
@@ -64,22 +72,29 @@
       "returncode": 0,
       "stdout": "",
       "stderr": "",
-      "workflow_sha256": "db5527417337f7b50e61ceddca8e19b22dd15bd0ff5f2cb047cd0990c1e8f866"
+      "workflow_sha256": "10e39943b2db762bd62861def8ea62495a890ce333a1b6bad51e1649ae8f19ff"
     }
   },
   "files": [
     {
+      "path": ".github/workflows/paper2-g3-diagnostic.yml",
+      "origin": "generated",
+      "origin_path": "generated:src/paper2/prototype/paper2-g3-diagnostic.yml",
+      "sha256": "230f62cae01c5d55bc7ba300f06bfa3ec3c2ccd95f403a02d1c4c9eff3d7f6e4",
+      "frozen": false
+    },
+    {
       "path": ".github/workflows/paper2-g3-replay.yml",
       "origin": "generated",
       "origin_path": "generated:src/paper2/prototype/paper2-g3-replay.yml",
-      "sha256": "7c9f1622e971b669887c02179b59549b18b217871fc76a51a4d846cdb7c6db47",
+      "sha256": "4005ec96de45a9d0b788ebd4887ca5a1e476116622c22cba2a36f0f812efa555",
       "frozen": false
     },
     {
       "path": ".github/workflows/paper2-g3.yml",
       "origin": "generated",
       "origin_path": "generated:src/paper2/prototype/paper2-g3.yml",
-      "sha256": "db5527417337f7b50e61ceddca8e19b22dd15bd0ff5f2cb047cd0990c1e8f866",
+      "sha256": "10e39943b2db762bd62861def8ea62495a890ce333a1b6bad51e1649ae8f19ff",
       "frozen": false
     },
     {
@@ -99,7 +114,7 @@
       "path": "README.md",
       "origin": "generated",
       "origin_path": "generated",
-      "sha256": "27519de22241c5013bc8bec538a05347e0a60de51a71481ac40b0968ed260c7e",
+      "sha256": "6274a4fe374f62ffd4bb1c55a24af019b00673c2b5b19e9f2fb9166178e8cb97",
       "frozen": false
     },
     {
@@ -183,7 +198,7 @@
     {
       "path": "src/paper2/model/engine.py",
       "origin_path": "src/paper2/model/engine.py",
-      "sha256": "1d20646da6312e2e21135efa2fc05cae9888e9ffc2a095c98d3ffe88836aa17d",
+      "sha256": "ecceae49a9ca5634c8132b7af4fc5dc54431ddde905f2c9121e1bc874dd621ac",
       "frozen": false
     },
     {
@@ -231,31 +246,49 @@
     {
       "path": "src/paper2/prototype/calibration.py",
       "origin_path": "src/paper2/prototype/calibration.py",
-      "sha256": "f2f857ce4cb054f88cdf8f31a93391abed6bd24faffa68cb2997d71c4eabf1ef",
+      "sha256": "a87b572cf88af30a68177a15fef59ddd675297abdfe25648fb4d1b26eba54fef",
       "frozen": false
     },
     {
       "path": "src/paper2/prototype/corpus.py",
       "origin_path": "src/paper2/prototype/corpus.py",
-      "sha256": "f1546a73162fa9068b69a50a3468a2fffe472e35a6ecd8f0f40491254185069b",
+      "sha256": "ad0052936ddb78b46d7dbe23b79926f7ac55f0b4298c6a2c360255d9b1733618",
+      "frozen": false
+    },
+    {
+      "path": "src/paper2/prototype/diagnostic.py",
+      "origin_path": "src/paper2/prototype/diagnostic.py",
+      "sha256": "ed8bd850b80673d509b21862d270024de05c0c6961b49fa8beff5f288721e8a1",
       "frozen": false
     },
     {
       "path": "src/paper2/prototype/export.py",
       "origin_path": "src/paper2/prototype/export.py",
-      "sha256": "3215cccbc1c8e8dcc01c69ba4c64bd7c10eeca2360d7dc1c31eccb4460427f6d",
+      "sha256": "209c2d6964839f6e7852793dbdfacbcee7619e58b37ce422b724e6944ec05d95",
+      "frozen": false
+    },
+    {
+      "path": "src/paper2/prototype/paper2-g3-diagnostic.yml",
+      "origin_path": "src/paper2/prototype/paper2-g3-diagnostic.yml",
+      "sha256": "426aee2077e9d4b1c422b0b3e7f51e878fc66abf64e0f5476e5a99ac0b131b23",
       "frozen": false
     },
     {
       "path": "src/paper2/prototype/paper2-g3-replay.yml",
       "origin_path": "src/paper2/prototype/paper2-g3-replay.yml",
-      "sha256": "7c9f1622e971b669887c02179b59549b18b217871fc76a51a4d846cdb7c6db47",
+      "sha256": "4005ec96de45a9d0b788ebd4887ca5a1e476116622c22cba2a36f0f812efa555",
       "frozen": false
     },
     {
       "path": "src/paper2/prototype/paper2-g3.yml",
       "origin_path": "src/paper2/prototype/paper2-g3.yml",
-      "sha256": "81eb123d5e937a2c96f7273ec91bcbd3cdb29baca0f64867d22e759721bd204b",
+      "sha256": "7ba67aed21e3998e4d08660e5ca31d101fe1eb1d458cdd201254d17d848f43fe",
+      "frozen": false
+    },
+    {
+      "path": "src/paper2/prototype/progress.py",
+      "origin_path": "src/paper2/prototype/progress.py",
+      "sha256": "75c41de71cb676fbeb72fe1e85fb0febfe01304211bd332b727b7cb6b35808da",
       "frozen": false
     },
     {
@@ -265,21 +298,33 @@
       "frozen": false
     },
     {
+      "path": "src/paper2/prototype/public_corpus.py",
+      "origin_path": "src/paper2/prototype/public_corpus.py",
+      "sha256": "616fcb5dea8e380024e80398b7a21d0c3450bd981265b80dbec7744cbb3132c6",
+      "frozen": false
+    },
+    {
       "path": "src/paper2/prototype/replay.py",
       "origin_path": "src/paper2/prototype/replay.py",
-      "sha256": "d1afdd4b386c30a7358c7adbc481b210910e88ae422cc8f10dfae5fe9663d674",
+      "sha256": "a3c894dd90da5cb50a5b99c198fbfb8bcd92ffee35ac2513c25b1ff241715a38",
       "frozen": false
     },
     {
       "path": "src/paper2/prototype/runner.py",
       "origin_path": "src/paper2/prototype/runner.py",
-      "sha256": "bc9acf821b4ee03b65f63415eda3f36b206c8970f0d6733c3af4e25152917f1e",
+      "sha256": "74b0ec1286817faa11455e4701301e064ba781a995f5f407a6a86b1bb5007d02",
       "frozen": false
     },
     {
       "path": "src/paper2/prototype/runtime.py",
       "origin_path": "src/paper2/prototype/runtime.py",
-      "sha256": "a043714d9f0da7e63ee746ecddb8cd62750b65f68f6fcbe12579e78482afd490",
+      "sha256": "715de9ddcf4ca22338c6c9268f8c52ea6686bb46e5e91628b31948873b7e79f8",
+      "frozen": false
+    },
+    {
+      "path": "src/paper2/prototype/serialisation.py",
+      "origin_path": "src/paper2/prototype/serialisation.py",
+      "sha256": "b446e26749c9e6a2875e2d53b9675e82d9cf136923e474c4cb2dc411e197cd7f",
       "frozen": false
     },
     {
@@ -391,15 +436,21 @@
       "frozen": false
     },
     {
+      "path": "tests/paper2/test_phase5a_deviation4.py",
+      "origin_path": "tests/paper2/test_phase5a_deviation4.py",
+      "sha256": "923005069f0229657415c2ff527ad7c9941d35187ae28fe66ce8ea985642f69b",
+      "frozen": false
+    },
+    {
       "path": "tests/paper2/test_phase5a_dispatcher.py",
       "origin_path": "tests/paper2/test_phase5a_dispatcher.py",
-      "sha256": "9dbc18ee72d438409f71d282045564b76bc1811bf24bff1f0f0c64ddd53ff369",
+      "sha256": "37dd737ba94ba42f7906b971faa04647cedd868f49962ccd6a3c1bd933b99161",
       "frozen": false
     },
     {
       "path": "tests/paper2/test_phase5a_protocol.py",
       "origin_path": "tests/paper2/test_phase5a_protocol.py",
-      "sha256": "1b0145ec74b0efd7b534143b868c7bd880e1e411cb4d2a6e312c74f45e00ce8f",
+      "sha256": "c0729c3d03c56f97113695cfc45f7eea0095e2cfa7d50c16ab5d82a8b2884ed5",
       "frozen": false
     },
     {
@@ -411,7 +462,7 @@
     {
       "path": "tests/paper2/test_phase5a_replay.py",
       "origin_path": "tests/paper2/test_phase5a_replay.py",
-      "sha256": "ec07bb3e6a6e5073db63439867ad114063da6fdd97e29a734763a873757098d9",
+      "sha256": "f75fe26deaf1c5d161fcbb6ceb77a9caac3eeec096afe7c6931f7f4599d5f478",
       "frozen": false
     }
   ],

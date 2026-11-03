@@ -11,15 +11,18 @@ import os
 from pathlib import Path
 import platform
 import statistics
+import shutil
 import subprocess
 import time
 import traceback
+import tempfile
 
 from src.paper2.model.service_times import ROOT,derive_seed,STREAM_NAMES
 from src.paper2.model.engine import _git_state
 from src.paper2.workload import generate_workload
 from src.paper2.verify.invariants import check
-from . import corpus,replay
+from . import corpus,replay,public_corpus
+from .progress import read_progress,phase_times
 from .analysis import references,cells,dispatcher_guard,metrics
 from .calibration import calibrate_once
 from .runtime import run
@@ -60,11 +63,27 @@ def _fresh_entry(pipe,function,args):
     finally:pipe.close()
 
 
-def fresh(function,args,timeout):
+def fresh(function,args,timeout,progress_path=None,phase_timeouts=None,partial_dir=None):
     ctx=mp.get_context("spawn");parent,child=ctx.Pipe(False)
     process=ctx.Process(target=_fresh_entry,args=(child,function,args));process.start();child.close()
     try:
-        if not parent.poll(timeout):raise TimeoutError("fresh-process stage exceeded remaining budget")
+        begin=time.monotonic()
+        while not parent.poll(.1):
+            rows=read_progress(progress_path) if progress_path else []
+            phases=[r for r in rows if r["phase"]!="second"]
+            last=phases[-1]["phase"] if phases else "process_start_pending"
+            active="serialisation" if any(r["phase"]=="serialisation_start" for r in phases) else (
+                "prototype window" if any(r["phase"]=="prototype_window_start" for r in phases) else "preparation")
+            anchor={"preparation":"process_start","prototype window":"prototype_window_start","serialisation":"serialisation_start"}[active]
+            stamp=next((r["monotonic_ns"] for r in phases if r["phase"]==anchor),int(begin*1e9))
+            exceeded=phase_timeouts and phases and (time.monotonic_ns()-stamp)/1e9>phase_timeouts[active]
+            if time.monotonic()-begin>timeout or exceeded:
+                process.terminate();process.join(5)
+                evidence=None
+                if partial_dir and progress_path and Path(progress_path).parent.exists():
+                    evidence=Path(partial_dir);shutil.copytree(Path(progress_path).parent,evidence,dirs_exist_ok=True)
+                    save(evidence/"timeout.json",dict(last_phase=last,stage=active,partial_outputs_preserved=True))
+                raise TimeoutError("fresh-process timeout; last phase: "+last+"; evidence: "+str(evidence))
         success,value=parent.recv();process.join(5)
         if not success:raise RuntimeError(value)
         if process.exitcode!=0:raise RuntimeError("fresh process did not exit successfully")
@@ -74,12 +93,13 @@ def fresh(function,args,timeout):
         parent.close()
 
 
-def prototype_run(config,corpus_path):
-    begin=time.perf_counter();e,m=run(config,corpus_path,stop_t=105)
-    violations=check(e,e.parent/"jobs.csv",m)
-    result=dict(events=str(e),manifest=str(m),metrics=metrics(e,e.parent/"jobs.csv",m),
-        violations=violations,elapsed=time.perf_counter()-begin)
-    save(e.parent/"verification.json",result)
+def prototype_run(config,corpus_path,validated_sha256=None):
+    begin=time.perf_counter();e,m=run(config,corpus_path,stop_t=105,validated_sha256=validated_sha256)
+    rows=read_progress(e.parent/"progress.jsonl")
+    result=dict(events=str(e),manifest=str(m),progress=str(e.parent/"progress.jsonl"),
+        phase_seconds=phase_times(rows),drain_complete=next(r["drain_complete"] for r in reversed(rows) if r["phase"]=="exit"),
+        elapsed=time.perf_counter()-begin,postprocessing="pending deterministic replay")
+    save(e.parent/"prototype-receipt.json",result)
     return result
 
 
@@ -95,10 +115,13 @@ def project(root,stage,seconds,details):
 
 
 STAGE_CAPS=dict(pilot=10*60,calibration=20*60,presigning=50*60,prototype=88*60)
+ENGINEERING_CAPS=None  # Author-approved ARM diagnostic measurements are required first.
 
 
-def arm_remaining_projection(signing_seconds,run_count):
-    return signing_seconds+run_count*110+7*60
+def arm_remaining_projection(signing_seconds,run_count,engineering_caps=None):
+    caps=engineering_caps if engineering_caps is not None else ENGINEERING_CAPS
+    if caps is None:raise RuntimeError("STOP: preparation/serialisation caps unset pending ARM diagnostic")
+    return signing_seconds+run_count*(110+caps["preparation"]+caps["serialisation"])+7*60
 
 
 def account(root,totals,stage,seconds):
@@ -119,11 +142,13 @@ def merge_samples(paths,target):
 
 
 def execute(root):
+    if ENGINEERING_CAPS is None:raise RuntimeError("STOP: validation awaits ARM diagnostic and preparation/serialisation caps")
     root=Path(root).resolve()
     if ROOT==root or ROOT in root.parents:raise ValueError("runner output must be outside checkout")
     if platform.machine().lower() not in ("aarch64","arm64") or len(os.sched_getaffinity(0))<4:
         raise RuntimeError("ARM runner with at least four usable vCPUs required")
     if not (root/"conformance.json").is_file():raise RuntimeError("native conformance must precede calibration")
+    private=tempfile.TemporaryDirectory(prefix="paper2-g3-presigning-");private_root=Path(private.name)
     start=time.monotonic();state=dict(status="calibration",cells=[],prototypes=[]);stage_times={}
     save(root/"protocol.json",state)
     try:
@@ -132,8 +157,8 @@ def execute(root):
         for backend in BACKENDS:
             before=time.perf_counter()
             w=generate_workload(parameters(2560,0,.05,horizon=.1))
-            data=corpus.build(w,backend,processes=1);corpus.validate(data,primitive_checks=True)
-            path=corpus.write(data,root/"corpora"/(backend+"-calibration.json"))
+            data=corpus.build(w,backend,processes=1,primitive_checks=True)
+            path=corpus.write(data,private_root/(backend+"-calibration.json"))
             pilot=dict(elapsed=time.perf_counter()-before,presigning=data["presigning"],corpus=str(path))
             pilots[backend]=pilot;save(root/"signing-pilots.json",pilots)
             account(root,stage_times,"pilot",time.perf_counter()-before)
@@ -213,9 +238,8 @@ def execute(root):
         for backend in validation_backends:
             for rep,file in enumerate(traces[backend]):
                 before=time.perf_counter()
-                data=corpus.build(json.loads(file.read_text()),backend,processes=2)
-                corpus.validate(data,primitive_checks=True)
-                masters[backend,rep]=corpus.write(data,root/"corpora"/f"{backend}-master-r{rep}.json")
+                data=corpus.build(json.loads(file.read_text()),backend,processes=2,primitive_checks=True)
+                masters[backend,rep]=corpus.write(data,private_root/f"{backend}-master-r{rep}.json")
                 account(root,stage_times,"presigning",time.perf_counter()-before)
         project(root,"prototype",arm_remaining_projection(0,run_count),dict(prototype_runs=run_count,
             simulation="separate replay workflow",signing_projection=messages))
@@ -227,22 +251,34 @@ def execute(root):
                 backend=cell["backend"];master=json.loads(masters[backend,rep].read_text())
                 before=time.perf_counter()
                 w=generate_workload(parameters(cell["rate"],rep,cell["period"]))
-                data=corpus.build(w,backend,processes=2,master=master);corpus.validate(data,primitive_checks=True)
-                path=corpus.write(data,root/"corpora"/f"cell{cell_id}-r{rep}.json")
+                data=corpus.build(w,backend,processes=2,master=master,primitive_checks=True)
+                path=corpus.write(data,private_root/f"cell{cell_id}-r{rep}.json")
                 account(root,stage_times,"presigning",time.perf_counter()-before)
                 base=root/"validation"/f"cell{cell_id}-r{rep}"
                 config=settings(data["workload"],cell,base/"prototype")
                 before=time.perf_counter()
-                proto=fresh(prototype_run,(config,path),min(180,remaining(root)))
+                proto=fresh(prototype_run,(config,path,replay.sha256_file(path)),remaining(root),
+                    progress_path=base/"prototype/progress.jsonl",
+                    phase_timeouts={"preparation":ENGINEERING_CAPS["preparation"],"prototype window":110,
+                                    "serialisation":ENGINEERING_CAPS["serialisation"]},
+                    partial_dir=root/"timeouts"/f"cell{cell_id}-r{rep}")
                 rid=f"cell{cell_id}-r{rep}"
                 entry=next(r for r in index["runs"] if r["run_id"]==rid)
                 entry["manifest_sha256"]=replay.create_packet(inputs/rid,config,path,proto,
                     calibrations[backend][cell["k"]]["occupancy_samples"],cell,rep)
                 replay.write_index(inputs,index)
-                account(root,stage_times,"prototype",time.perf_counter()-before)
+                for phase,seconds in proto["phase_seconds"].items():
+                    stage="prototype" if phase=="prototype window" else phase
+                    stage_times[stage]=stage_times.get(stage,0)+seconds
+                    cap=STAGE_CAPS[stage] if stage=="prototype" else run_count*ENGINEERING_CAPS[stage]
+                    if stage_times[stage]>cap:raise RuntimeError("STOP: "+stage+" stage cap exceeded")
+                save(root/"stage-times.json",dict(elapsed_seconds=stage_times,caps_seconds=dict(STAGE_CAPS,
+                    **{s:run_count*ENGINEERING_CAPS[s] for s in ("preparation","serialisation")})))
                 state["prototypes"].append(dict(run_id=rid,cell=cell,replicate=rep,prototype=proto))
                 save(root/"protocol.json",state)
-                if proto["violations"] or not proto["metrics"]["complete"]:
+                state["public_corpus"]=public_corpus.audit_upload(inputs)
+                save(root/"protocol.json",state)
+                if not proto["drain_complete"]:
                     raise ValueError("prototype incomplete or invariant violations; replay inputs retained")
         index["status"]=replay.PENDING;replay.write_index(inputs,index)
         replay.verify(inputs)
@@ -252,6 +288,7 @@ def execute(root):
         save(root/"protocol.json",state)
         raise
     finally:
+        private.cleanup()
         state["orchestrator_wall_seconds"]=time.monotonic()-start;save(root/"protocol.json",state)
         lines=["# G3 prototype measurement outcome", "", "Status: "+state["status"], "", state.get("failure",""), "",
             "| Backend | k | Policy | Nominal rho | lambda | B_ref | B_cold | lambda*d_dispatch |",
@@ -262,7 +299,7 @@ def execute(root):
         for item in state.get("excluded_cells",[]):
             c=item["cell"]
             lines.append(str(c)+": "+item["reason"])
-        lines += ["", "Per-repetition prototype metrics and invariant results are in protocol.json.",
+        lines += ["", "Prototype measurements are recorded; metrics and invariant checks run only in replay.",
                   "Paired primary/held-out simulations and G3 agreement are pending the separate replay workflow.",
                   "This ARM workflow makes no G3 agreement pass/fail claim."]
         (root/"PROTOCOL_REPORT.md").write_bytes(("\n".join(lines)+"\n").encode())
@@ -294,8 +331,11 @@ def hash_artifacts(root):
 def main():
     p=argparse.ArgumentParser();p.add_argument("--output",type=Path);p.add_argument("--execute",action="store_true")
     p.add_argument("--record-host",type=Path);p.add_argument("--record-start",type=Path);p.add_argument("--hash-artifacts",type=Path)
+    p.add_argument("--require-validation-caps",action="store_true")
     a=p.parse_args()
-    if a.record_start:save(a.record_start/"watchdog.json",dict(monotonic_ns=time.monotonic_ns(),work_minutes=280,upload_minutes=10))
+    if a.require_validation_caps:
+        if ENGINEERING_CAPS is None:raise SystemExit("STOP: validation awaits ARM diagnostic; engineering caps unset")
+    elif a.record_start:save(a.record_start/"watchdog.json",dict(monotonic_ns=time.monotonic_ns(),work_minutes=280,upload_minutes=10))
     elif a.record_host:record_host(a.record_host)
     elif a.hash_artifacts:hash_artifacts(a.hash_artifacts)
     elif a.execute and a.output and os.environ.get("GITHUB_ACTIONS")=="true":execute(a.output)

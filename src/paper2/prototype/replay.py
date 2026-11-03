@@ -1,4 +1,4 @@
-"""Hash-bound, signature-free deterministic replay; no signing or native verification."""
+"""Hash-bound deterministic replay and full checking of public signed evidence."""
 
 import argparse
 import csv
@@ -15,6 +15,7 @@ from src.paper2.model.engine import Model, run_model, _git_state
 from src.paper2.model.service_times import JOB_CLASSES, ROOT, sha256_file
 from src.paper2.verify.invariants import check
 from .analysis import BANDS, CapturedService, compare, costs, metrics, samples_from_jobs
+from . import public_corpus
 
 SCHEMA="paper2-g3-replay-v1"
 PENDING="prototype-complete: replay pending"
@@ -53,6 +54,8 @@ def audit_value(value):
 
 
 def audit_file(path):
+    if path.name=="public-corpus.zip":
+        public_corpus.validate_archive(path);return
     if path.name.lower().startswith(".env") or path.suffix.lower() in (".pem",".key",".p12",".pfx"):
         raise ValueError("private material filename in replay input")
     if path.suffix==".json":audit_value(read(path))
@@ -110,6 +113,7 @@ def write_index(root,index):
 
 def verify_index(root,source_run_id=None,complete=True):
     root=Path(root);index=read(root/"INDEX.json")
+    if index.get("purpose")=="DIAGNOSTIC":raise ValueError("DIAGNOSTIC inputs excluded from G3 assessment")
     if sha256_file(root/"INDEX.json")!=(root/"INDEX.sha256").read_text().strip():raise ValueError("replay index SHA-256 mismatch")
     if index["schema"]!=SCHEMA or not re.fullmatch(r"[0-9a-f]{40}",index["code_commit"]):raise ValueError("invalid replay index provenance")
     if source_run_id is not None and index["source_run_id"]!=str(source_run_id):raise ValueError("source run identity mismatch")
@@ -142,15 +146,17 @@ def create_packet(directory,config,corpus_path,prototype,held_out,cell,replicate
           for name,e in doc["transactions"].items()}
     info=dict(cell=cell,replicate=replicate,backend=doc["backend"],mapped=costs(meta),seeds=meta["seeds"],window=list(window),
         source_commit=meta["git"]["commit"],corpus_sha256=meta["prototype"]["corpus_sha256"],
-        prototype_checks=dict(mode="prototype",violations=prototype["violations"],
-            provenance="native real-byte checker executed on ARM before signature-free export"))
+        prototype_checks=dict(mode="prototype",status="pending deterministic replay",
+            provenance="full real-byte checker retained; public signed artifact verified before checking"))
     values={"config.json":config,"workload.json":doc["workload"],"keys.json":keys,
-            "info.json":info,"prototype/metrics.json":prototype["metrics"]}
+            "info.json":info}
     originals={"prototype/events.csv":Path(prototype["events"]),
         "prototype/jobs.csv":Path(prototype["events"]).parent/"jobs.csv",
         "prototype/manifest.json":Path(prototype["manifest"]),
         "prototype/dispatcher_spans.json":Path(prototype["manifest"]).parent/meta["prototype"]["spans"]["path"],
         "held-out.csv":Path(held_out)}
+    progress=Path(prototype["events"]).parent/"progress.jsonl"
+    if progress.is_file():originals["prototype/progress.jsonl"]=progress
     for value in values.values():audit_value(value)
     for path in originals.values():audit_file(path)
     with Path(held_out).open(newline="",encoding="utf-8") as stream:
@@ -159,6 +165,8 @@ def create_packet(directory,config,corpus_path,prototype,held_out,cell,replicate
                 raise ValueError("held-out calibration backend/k mismatch")
     if directory.exists():raise FileExistsError("replay packet already exists")
     directory.mkdir(parents=True)
+    existing=public_corpus.inventory(directory.parent)["files"]
+    info["public_corpus"]=public_corpus.write_archive(doc,directory/"prototype/public-corpus.zip",existing)
     for name,value in values.items():save(directory/name,value)
     for name,path in originals.items():
         target=directory/name;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(path,target)
@@ -212,6 +220,17 @@ def simulate(directory,sample,output):
     return run_model(config,model_type=lambda c:ReplayModel(c,directory,sample))
 
 
+def postprocess_prototype(directory,output):
+    directory=Path(directory)
+    verify_files(directory,"REPLAY_MANIFEST.json")
+    info=read(directory/"info.json")
+    manifest=public_corpus.checker_manifest(directory,output)
+    events,jobs=directory/"prototype/events.csv",directory/"prototype/jobs.csv"
+    violations=check(events,jobs,manifest)
+    return dict(metrics=metrics(events,jobs,manifest,*info["window"]),violations=violations,
+                input_sha256=sha256_file(directory/"REPLAY_MANIFEST.json"))
+
+
 def execute(root,run_id,output,source_run_id=None):
     root=Path(root);output=Path(output)
     index=verify_index(root,source_run_id)
@@ -225,11 +244,9 @@ def execute(root,run_id,output,source_run_id=None):
     output.mkdir(parents=True)
     result=dict(run_id=run_id,cell_id=run["cell_id"],replicate=run["replicate"],cell=info["cell"],
         code_commit=index["code_commit"],source_run_id=index["source_run_id"],input_sha256=run["manifest_sha256"],
-        seeds=info["seeds"],prototype=dict(metrics=read(directory/"prototype/metrics.json"),
-                                        violations=info["prototype_checks"]["violations"]))
+        seeds=info["seeds"])
     try:
-        recalculated=metrics(directory/"prototype/events.csv",directory/"prototype/jobs.csv",directory/"prototype/manifest.json",*info["window"])
-        if recalculated!=result["prototype"]["metrics"]:raise ValueError("prototype metric recomputation differs")
+        result["prototype"]=postprocess_prototype(directory,output/"prototype-check")
         for name,sample in (("primary","primary.csv"),("held_out","held-out.csv")):
             begin=time.perf_counter();e,m=simulate(directory,directory/sample,output/name)
             if read(m)["seeds"]!=info["seeds"]:raise ValueError("replay seed derivation differs from prototype")
@@ -299,8 +316,8 @@ def gather(root,results,output,source_run_id=None):
                 run=next((r for r in index["runs"] if r["run_id"]==result.get("run_id")),None)
                 if run is not None:
                     directory,info=packet(root,index,run)
-                    expected=dict(metrics=read(directory/"prototype/metrics.json"),violations=info["prototype_checks"]["violations"])
-                    if result.get("prototype")!=expected or result.get("seeds")!=info["seeds"]:
+                    receipt=result.get("prototype",{}).get("input_sha256")
+                    if receipt!=run["manifest_sha256"] or result.get("seeds")!=info["seeds"]:
                         raise ValueError("result differs from recorded prototype evidence/seeds")
                 records.append(result)
             except (OSError,ValueError,KeyError) as exc:errors.append(dict(check="result checksum/schema",path=path.parent.name,detail=str(exc)))
