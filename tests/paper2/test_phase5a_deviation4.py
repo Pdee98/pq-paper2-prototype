@@ -150,6 +150,31 @@ class Deviation4(unittest.TestCase):
         for a,b,expected in ((0,6,3),(1.5,4,1.5),(2,3,0),(4,7,1)):
             self.assertEqual(diagnostic.overlap(a,b,integral),expected)
 
+    def test_diagnostic_signing_stages_have_hard_fresh_process_timeouts(self):
+        for stage,processes in (("pilot",1),("presigning",2)):
+            with patch.object(runner,"fresh",return_value=dict(path="public.json")) as fresh:
+                diagnostic.bounded_presign(dict(run_id=diagnostic.RUN_ID),processes,"public.json",stage)
+                fresh.assert_called_once_with(diagnostic.presign,
+                    (dict(run_id=diagnostic.RUN_ID),processes,"public.json"),diagnostic.TIMEOUTS[stage])
+
+    def test_diagnostic_rate_never_refits_to_a_dispatcher_bottleneck(self):
+        cell=diagnostic.fixed_cell(dict(B_ref=1000,B_cold=900),.001)
+        self.assertEqual(cell["rate"],1115.433019832252)
+        self.assertEqual(cell["period"],.11475364071546823)
+        self.assertEqual(cell["rho"],.5)
+        self.assertGreater(cell["dispatcher_utilisation"],.5)
+        self.assertEqual(cell["fresh_calibration_reference"]["B_ref"],1000)
+
+    def test_diagnostic_presigning_returns_only_a_hash_bound_file_receipt(self):
+        with tempfile.TemporaryDirectory() as td:
+            doc=corpus.build(self.fixture(),"sleep")
+            with patch.object(diagnostic,"generate_workload",return_value=doc["workload"]), \
+                 patch.object(corpus,"build",return_value=doc) as build:
+                receipt=diagnostic.presign(dict(run_id=diagnostic.RUN_ID),2,Path(td)/"public.json")
+            build.assert_called_once_with(doc["workload"],"xmss",processes=2,primitive_checks=True)
+            self.assertEqual(receipt["sha256"],sha256_file(Path(receipt["path"])))
+            self.assertEqual(set(receipt),{"path","sha256","transactions","blocks"})
+
     def test_diagnostic_artifact_analysis_runs_full_checker_without_G3_assessment(self):
         with tempfile.TemporaryDirectory() as td:
             root=Path(td);doc=corpus.build(self.fixture(),"sleep");cp=corpus.write(doc,root/"corpus.json")
@@ -174,6 +199,11 @@ class Deviation4(unittest.TestCase):
             self.assertNotIn("status",report)
             self.assertFalse((root/"analysis/G3_STATUS.json").exists())
             self.assertIsNone(report["recommended_caps_seconds"])
+            with (root/"analysis/admission-block-lags.csv").open(newline="") as stream:
+                rows=list(csv.DictReader(stream))
+            for row in rows:
+                self.assertEqual(float(row["block_arrival_lag_from_tx_arrival"]),
+                    float(row["block_arrival_t"])-float(row["scheduled_tx_arrival_t"]))
 
 
 if __name__=="__main__":unittest.main()

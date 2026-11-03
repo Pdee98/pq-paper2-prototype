@@ -24,6 +24,8 @@ from .progress import read_progress, phase_times
 
 RUN_ID="paper2-g3-diag-v1"
 PURPOSE="DIAGNOSTIC"
+CELL0=dict(backend="xmss",k=1,policy="fifo",rho=.5,rate=1115.433019832252,
+           period=.11475364071546823,B_ref=2230.866039664504,B_cold=1119.102530780535)
 # Diagnostic watchdogs only. Production preparation/serialisation caps remain unset.
 TIMEOUTS={"pilot":600,"calibration":1200,"presigning":900,
           "preparation":900,"prototype window":110,"serialisation":1200}
@@ -35,6 +37,13 @@ RUN6=dict(pilot=75.90944254599981,calibration=535.1138159300003,
 
 def diagnostic_parameters(rate,period,horizon=90):
     return dict(runner.parameters(rate,0,period,horizon),run_id=RUN_ID)
+
+
+def fixed_cell(reference,dispatch_cost):
+    # The author forbids changing the diagnostic rate. A dispatcher bottleneck
+    # must stop this run, never lower its load through a new B_ref.
+    return dict(CELL0,d_dispatch=dispatch_cost,dispatcher_utilisation=CELL0["rate"]*dispatch_cost,
+                fresh_calibration_reference=reference)
 
 
 def projection():
@@ -63,6 +72,18 @@ def preflight():
         raise RuntimeError("ARM runner with at least four usable vCPUs required")
 
 
+def presign(parameters,processes,destination):
+    """Fresh-process stage: return a receipt, never send a large corpus on Pipe."""
+    doc=corpus.build(generate_workload(parameters),"xmss",processes=processes,primitive_checks=True)
+    path=corpus.write(doc,destination)
+    return dict(path=str(path),sha256=sha256_file(path),
+                transactions=len(doc["transactions"]),blocks=len(doc["blocks"]))
+
+
+def bounded_presign(parameters,processes,destination,stage):
+    return runner.fresh(presign,(parameters,processes,destination),TIMEOUTS[stage])
+
+
 def collect(root):
     root=Path(root).resolve()
     if root==ROOT or ROOT in root.parents:raise ValueError("diagnostic output must be outside checkout")
@@ -76,8 +97,9 @@ def collect(root):
         # Raw build ledgers stay outside ALL artifact upload roots.
         with tempfile.TemporaryDirectory(prefix="paper2-diagnostic-private-") as td:
             private=Path(td);before=time.perf_counter()
-            pilot=corpus.build(generate_workload(diagnostic_parameters(2560,.05,.1)),"xmss",primitive_checks=True)
-            cp=corpus.write(pilot,private/"calibration.json")
+            pilot=bounded_presign(diagnostic_parameters(2560,.05,.1),1,private/"calibration.json","pilot")
+            cp=Path(pilot["path"])
+            state["pilot_corpus_sha256"]=pilot["sha256"]
             state["pilot_seconds"]=time.perf_counter()-before
             if state["pilot_seconds"]>TIMEOUTS["pilot"]:raise TimeoutError("diagnostic pilot watchdog")
             before=time.perf_counter();results=[]
@@ -95,15 +117,13 @@ def collect(root):
                    for c in ("admission","block_tx","block_sig")}
             throughput={k:statistics.fmean(r["throughput"] for r in results if r["k"]==k) for k in (1,2,3)}
             d=max(r["dispatcher_per_tx"] for r in results if r["k"]==1)
-            ref=references(means,throughput,d)[1];rate=.5*ref["B_ref"]
-            cell=dict(backend="xmss",k=1,policy="fifo",rho=.5,rate=rate,period=128/rate,
-                      dispatcher_utilisation=rate*d,**ref)
+            ref=references(means,throughput,d)[1];cell=fixed_cell(ref,d);rate=cell["rate"]
             state["cell"]=cell;state["guard_holds"]=cell["dispatcher_utilisation"]<=.5
             runner.save(root/"protocol.json",state)
             if not state["guard_holds"]:raise RuntimeError("DIAGNOSTIC STOP: dispatcher guard exceeded; no prototype launched")
             before=time.perf_counter()
-            doc=corpus.build(generate_workload(diagnostic_parameters(rate,cell["period"])),"xmss",processes=2,primitive_checks=True)
-            cp=corpus.write(doc,private/"validation.json");validated=sha256_file(cp)
+            receipt=bounded_presign(diagnostic_parameters(rate,cell["period"]),2,private/"validation.json","presigning")
+            cp=Path(receipt["path"]);validated=receipt["sha256"];doc=replay.read(cp)
             state["presigning_seconds"]=time.perf_counter()-before
             if state["presigning_seconds"]>TIMEOUTS["presigning"]:raise TimeoutError("diagnostic presigning watchdog")
             cfg=runner.settings(doc["workload"],cell,root/"prototype")
@@ -229,6 +249,8 @@ def analyse(root,output,source_run_id):
             lags.append(dict(block_id=b["block_id"],tx_id=tx,admission_completion_t=finish,
                 admission_completion_lag=None if finish is None else finish-arrivals[tx],
                 block_arrival_lag=release["lateness"],
+                block_arrival_lag_from_tx_arrival=release["release_t"]-arrivals[tx],
+                block_arrival_t=release["release_t"],scheduled_tx_arrival_t=arrivals[tx],
                 admission_complete_before_block=finish is not None and finish<=release["release_t"]))
     report=dict(purpose=PURPOSE,excluded_from_G3=True,source_run_id=str(source_run_id),drain_complete=drain,
         prototype_violations=proto["violations"],phase_seconds=timing,occupancy_by_class=occupancy,
