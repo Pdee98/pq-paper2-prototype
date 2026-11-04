@@ -80,8 +80,14 @@ def fresh(function,args,timeout,progress_path=None,phase_timeouts=None,partial_d
             if time.monotonic()-begin>timeout or exceeded:
                 process.terminate();process.join(5)
                 evidence=None
-                if partial_dir and progress_path and Path(progress_path).parent.exists():
-                    evidence=Path(partial_dir);shutil.copytree(Path(progress_path).parent,evidence,dirs_exist_ok=True)
+                if partial_dir and progress_path:
+                    from .pause_attribution import recover
+                    evidence=Path(partial_dir)
+                    if Path(progress_path).parent.exists():
+                        recover(Path(progress_path).parent,write_missing=True)
+                        shutil.copytree(Path(progress_path).parent,evidence,dirs_exist_ok=True)
+                    else:
+                        evidence.mkdir(parents=True,exist_ok=True);recover(evidence,write_missing=True)
                     save(evidence/"timeout.json",dict(last_phase=last,stage=active,partial_outputs_preserved=True))
                 raise TimeoutError("fresh-process timeout; last phase: "+last+"; evidence: "+str(evidence))
         success,value=parent.recv();process.join(5)

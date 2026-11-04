@@ -158,6 +158,12 @@ def create_packet(directory,config,corpus_path,prototype,held_out,cell,replicate
         "held-out.csv":Path(held_out)}
     progress=Path(prototype["events"]).parent/"progress.jsonl"
     if progress.is_file():originals["prototype/progress.jsonl"]=progress
+    for name in ("gc_pauses.json","long_spans.json"):
+        path=Path(prototype["events"]).parent/name
+        if path.is_file():originals["prototype/"+name]=path
+        elif meta["prototype"].get("pause_attribution"):raise ValueError("missing pause attribution evidence: "+name)
+    callback_cost=Path(prototype["events"]).parent/"callback_overhead.json"
+    if callback_cost.is_file():originals["prototype/callback_overhead.json"]=callback_cost
     for value in values.values():audit_value(value)
     for path in originals.values():audit_file(path)
     with Path(held_out).open(newline="",encoding="utf-8") as stream:

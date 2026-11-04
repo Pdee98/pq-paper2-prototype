@@ -17,6 +17,7 @@ from .progress import Progress, phase_times, read_progress, peak_rss
 from .serialisation import CSVWriter, write_json
 from .dispatch_runtime import EvidenceList, SlicedCache
 from .validity import Validity
+from .pause_attribution import PauseRecorder, labelled, CODES, measure_callback_cost
 
 PROTOTYPE_FIELDS=("monotonic_ns","scheduled_t","dispatcher_span_id","send_ns","receive_ns",
                   "worker_start_ns","worker_end_ns","occupancy_ns","primitive_ns","dispatch_to_start_ns",
@@ -395,6 +396,7 @@ class CompletionFirstModel(PreDeviation5Model):
     SLICE_NS=200_000
 
     def __init__(self,*args,**kwargs):
+        self.pause_monitor=None
         self.completion_evidence=None;self.maintenance_context=None
         self.pending_sends=set();self.active_span=None;self.slice_start=None
         self.slice_stats={};self.servicing=False
@@ -419,6 +421,7 @@ class CompletionFirstModel(PreDeviation5Model):
             job[12] if job and event=="start" else None,job[13] if job and event=="end" else None)
         super()._record(record)
 
+    @labelled("admission_state")
     def _admit_state(self,job):
         Model._admit_state(self,job)
         if self.progress and self.admission_checks[-1]["passed"]:
@@ -427,12 +430,14 @@ class CompletionFirstModel(PreDeviation5Model):
             else:
                 self.progress.advance(self.t);self.progress.counts["admitted"]+=1
 
+    @labelled("cache_lookup_ttl")
     def _lookup(self,cache,job,negative=False):
         previous=self.maintenance_context
         self.maintenance_context=(job,"negative" if negative else "positive")
         try:return Model._lookup(self,cache,job,negative)
         finally:self.maintenance_context=previous
 
+    @labelled("send_start")
     def _start(self,job,worker):
         if worker in self.pending_sends or worker in self.pool.running:
             raise AssertionError("no prefetch: previous worker result not returned")
@@ -440,6 +445,7 @@ class CompletionFirstModel(PreDeviation5Model):
         super()._start(job,worker)
 
     def _receive(self,worker):
+        self._pause_step("receive_result")
         begin=time.monotonic_ns();reply=self.workers.pipes[worker].recv();receive=time.monotonic_ns()
         self.ipc_ns+=receive-begin
         if reply[0]!="result":raise RuntimeError("worker failure: "+str(reply))
@@ -457,16 +463,19 @@ class CompletionFirstModel(PreDeviation5Model):
             # Includes cache/pool/ledger/eligibility and EWMA/busy-window updates
             # in the simulator's exact order, followed by _dispatch/_start.
             # All selected jobs have been sent before evidence commits below.
+            self._pause_step("completion_state")
             Model._finish(self,job)
         finally:
             pending=self.completion_evidence;self.completion_evidence=None
             # Clock-handshake diagnostics do not affect selection. Fill their
             # captured end snapshots only after the successor has been sent.
+            self._pause_step("completion_clock_diagnostics")
             probe=min(next(r["probes"] for r in self.workers.clock_records
                 if r["worker_id"]==worker and r["phase"]=="before"),key=lambda r:r["uncertainty_ns"])
             job.worker_clock_offset_estimate_ns=probe["offset_ns"]
             job.worker_clock_uncertainty_ns=probe["uncertainty_ns"]
             job.dispatch_to_worker_start_ns=start-probe["offset_ns"]-job.dispatch_decision_ns
+            self._pause_step("completion_evidence_commit")
             for item in pending:
                 if item[0]=="row":
                     record=item[1];snapshot=record[6]
@@ -482,10 +491,12 @@ class CompletionFirstModel(PreDeviation5Model):
     def _begin_span(self,kind):
         self.span_id=len(self.spans);self.marker_ns=time.monotonic_ns()
         self.active_span=(kind,self.marker_ns);self.slice_start=self.marker_ns
+        if self.pause_monitor:self.pause_monitor.begin_span(self.span_id,kind,self.marker_ns)
         self._log("dispatcher_busy_start")
 
     def _end_span(self):
         kind,begin=self.active_span;end=time.monotonic_ns();self.marker_ns=end
+        if self.pause_monitor:self.pause_monitor.end_span(end)
         self._log("dispatcher_busy_end")
         self.spans.append(dict(id=self.span_id,start_ns=begin,end_ns=end,
             start_t=(begin-self.epoch)/1e9,end_t=(end-self.epoch)/1e9,kind=kind))
@@ -502,7 +513,9 @@ class CompletionFirstModel(PreDeviation5Model):
     def _checkpoint(self,reason):
         if (self.epoch is None or self.active_span is None or self.servicing or
                 self.completion_evidence is not None or time.monotonic_ns()-self.slice_start<self.SLICE_NS):return
+        previous_step=self.pause_monitor.current_step if self.pause_monitor else None
         kind=self.active_span[0];self._end_span()
+        self._pause_step("slice_poll_results")
         self.servicing=True
         try:
             begin=time.monotonic_ns()
@@ -511,19 +524,24 @@ class CompletionFirstModel(PreDeviation5Model):
             for worker in ready:self._handle(self._receive,worker)
         finally:
             self.servicing=False;self._begin_span(kind)
+            if self.pause_monitor and previous_step is not None:self.pause_monitor.step(previous_step)
 
+    @labelled("job_preparation")
     def _new_job(self,*args,**kwargs):
         self._checkpoint("block_prepare")
         return super()._new_job(*args,**kwargs)
 
+    @labelled("block_job_eligibility")
     def _enqueue(self,job):
         Model._enqueue(self,job)
         self._checkpoint("block_ready_or_admission")
 
+    @labelled("admission_structural")
     def _admit_ready(self,job):
         super()._admit_ready(job)
         self._checkpoint("admission")
 
+    @labelled("block_structural")
     def _block_ready(self,bid,jobs,structurally_valid):
         duration=0
         for tx in self.block_transactions[bid]:
@@ -535,6 +553,7 @@ class CompletionFirstModel(PreDeviation5Model):
         if not structurally_valid:
             self.blocks[bid]["structurally_rejected"]=True
             self._log("struct_reject",block_id=bid);self._reject(bid,{"structural"});return
+        self._pause_step("block_job_eligibility")
         for job in jobs:
             if job.job_class=="block_tx" and self._lookup(self.cache,job):
                 job.status="cache_hit";self.blocks[bid]["pending"]-=1
@@ -544,6 +563,21 @@ class CompletionFirstModel(PreDeviation5Model):
             # they need this checkpoint as well as the cold enqueue path.
             self._checkpoint("block_ready")
 
+    def _pause_step(self,name):
+        if self.pause_monitor:self.pause_monitor.step(CODES[name])
+
+    @labelled("policy_view")
+    def _view(self):return super()._view()
+
+    @labelled("select_dispatch")
+    def _dispatch(self):return Model._dispatch(self)
+
+    @labelled("cache_insert_evidence")
+    def _insert_cache(self,job,valid):return Model._insert_cache(self,job,valid)
+
+    @labelled("block_state")
+    def _decide_block(self,bid):return Model._decide_block(self,bid)
+
     def extra_manifest(self,directory):
         value=super().extra_manifest(directory)
         value["prototype"]["completion_dispatch"]=dict(deviation=5,
@@ -551,10 +585,22 @@ class CompletionFirstModel(PreDeviation5Model):
             atomic="selection-relevant completion/cache/pool/ledger transitions",
             deferred="event-buffer/progress commits; verification/accepted/cost/choose evidence appends")
         value["prototype"]["validity"]=self.validity.report((self.finish_ns-self.epoch)/1e9,final=True)
+        value["prototype"]["pause_attribution"]=dict(gc="gc_pauses.json",long_spans="long_spans.json",
+            scope="registered dispatcher capture prefix, ending before attribution JSON encoding",
+            gc_controls_changed=False)
         return value
 
     def run(self):
-        super().run()
+        owned=self.pause_monitor is None
+        if owned:
+            directory=self.config.get("output_dir")
+            if directory is None:directory=Path(self.event_writer.writer.stream.name).parent
+            self.pause_monitor=PauseRecorder(directory);self.pause_monitor.register()
+        complete=False
+        try:
+            super().run();self._pause_step("serialisation");complete=True
+        finally:
+            if owned:self.pause_monitor.finish(partial=not complete)
         if self.progress:self.progress.phase("prototype_validity",
             **self.validity.report((self.finish_ns-self.epoch)/1e9,final=True))
 
@@ -564,15 +610,24 @@ RealtimeModel=CompletionFirstModel
 
 def run(config,corpus_path,*,sleep_seconds=0,stop_t=None,validated_sha256=None):
     progress=Progress(config["output_dir"]) if config.get("output_dir") else None
-    holder=[]
+    holder=[];monitor=None
     def create(c):
-        model=RealtimeModel(c,corpus_path,sleep_seconds,stop_t,validated_sha256,progress);holder.append(model);return model
+        model=RealtimeModel(c,corpus_path,sleep_seconds,stop_t,validated_sha256,progress)
+        model.pause_monitor=monitor;holder.append(model);return model
     try:
+        if config.get("output_dir"):
+            monitor=PauseRecorder(config["output_dir"]);monitor.register()
         e,m=run_model(config,model_type=create)
+        if monitor:
+            monitor.finish()
+            write_json(e.parent/"callback_overhead.json",measure_callback_cost())
         if progress:
             model=holder[0]
             progress.phase("serialisation_end",event_rows=model.row_count,jobs=len(model.jobs),peak_parent_rss_bytes=peak_rss())
             progress.phase("exit",drain_complete=not model.incomplete,event_rows=model.row_count,jobs=len(model.jobs))
         return e,m
     finally:
-        if progress:progress.close()
+        try:
+            if monitor and not monitor.closed:monitor.finish(partial=True)
+        finally:
+            if progress:progress.close()

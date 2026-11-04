@@ -21,6 +21,7 @@ from . import corpus, public_corpus, replay, runner
 from .analysis import distribution, references, read_jobs
 from .calibration import calibrate_once
 from .progress import read_progress, phase_times
+from .pause_attribution import summarise as summarise_pauses, estimate_overhead
 
 RUN_ID="paper2-g3-diag-v1"
 PURPOSE="DIAGNOSTIC v2"
@@ -206,6 +207,7 @@ def analyse(root,output,source_run_id):
         else:spans.append((a,b))
     spans=SpanIntegral(spans)
     admission_ends={};qa=qb=busy=0;previous=0.;idle=covered=0.;cursor=0;first_drop=None
+    waiting_at_end={};waiting_at_start={}
     with (packet/"prototype/events.csv").open(newline="") as stream:
         for r in csv.DictReader(stream):
             t=float(r["t"]);end=min(105,t)
@@ -214,6 +216,8 @@ def analyse(root,output,source_run_id):
             while cursor<105 and cursor+1<=t:
                 seconds[cursor].update(q_admission=qa,q_block=qb);cursor+=1
             qa,qb,busy=int(r["q_admission"]),int(r["q_block"]),int(r["busy_workers"])
+            if r["event"]=="end":waiting_at_end[r["job_id"]]=qa+qb>0
+            elif r["event"]=="start":waiting_at_start[r["job_id"]]=qa+qb>0
             previous=end
             i=int(t)
             if 0<=i<105:
@@ -260,7 +264,22 @@ def analyse(root,output,source_run_id):
                 block_arrival_lag_from_tx_arrival=release["release_t"]-arrivals[tx],
                 block_arrival_t=release["release_t"],scheduled_tx_arrival_t=arrivals[tx],
                 admission_complete_before_block=finish is not None and finish<=release["release_t"]))
+    pause_files=[packet/"prototype"/n for n in ("gc_pauses.json","long_spans.json")]
+    pause_summary=dict(status="NOT RECORDED")
+    if all(path.is_file() for path in pause_files):
+        physical=sorted((j for j in records if "send_ns" in j),key=lambda j:(j["worker_id"],j["send_ns"]))
+        gaps=[]
+        for j,n in zip(physical,physical[1:]):
+            if (j["worker_id"]==n["worker_id"] and "receive_ns" in j and
+                    waiting_at_end.get(j["job_id"]) and waiting_at_start.get(n["job_id"])):
+                gaps.append((j["receive_ns"],n["send_ns"]))
+        pause_summary=summarise_pauses(replay.read(pause_files[0]),replay.read(pause_files[1]),spans_raw,gaps)
+        pause_summary["gap_cohort"]="receive to next send, per worker; positive waiting counters at completion and after successor start; whole trace"
+        callback_cost=packet/"prototype/callback_overhead.json"
+        pause_summary["callback_overhead"]=(estimate_overhead(replay.read(pause_files[0]),replay.read(callback_cost),
+            p["epoch_ns"],p["finish_ns"],p["dispatcher_active_ns"]) if callback_cost.is_file() else dict(status="NOT RECORDED"))
     report=dict(purpose=PURPOSE,excluded_from_G3=True,source_run_id=str(source_run_id),drain_complete=drain,
+        pause_attribution=pause_summary,
         prototype_validity=proto["validity"],
         prototype_violations=proto["violations"],phase_seconds=timing,occupancy_by_class=occupancy,
         row_counts=dict(events=p["event_buffer"]["rows"],jobs=len(records),spans=len(spans_raw)),
