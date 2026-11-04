@@ -34,6 +34,7 @@ class Progress:
         self.path = directory / "progress.jsonl"
         self.stream = self.path.open("x", encoding="utf-8", buffering=8192)
         self.second = 0; self.counts = self.fresh(); self.queues = (0, 0)
+        self.diagnostics = None
         self.phase("process_start", pid=os.getpid())
 
     @staticmethod
@@ -41,6 +42,8 @@ class Progress:
         return dict(admitted=0, started=0, completed=0, block_tx_hit=0, block_tx_miss=0)
 
     def phase(self, name, **counts):
+        if name=="second" and self.diagnostics is not None:
+            counts["prototype_validity"]=self.diagnostics()
         row = dict(monotonic_ns=time.monotonic_ns(), phase=name, **counts)
         self.stream.write(json.dumps(row, separators=(",", ":")) + "\n")
         self.stream.flush()

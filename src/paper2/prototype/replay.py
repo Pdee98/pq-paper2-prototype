@@ -16,6 +16,7 @@ from src.paper2.model.service_times import JOB_CLASSES, ROOT, sha256_file
 from src.paper2.verify.invariants import check
 from .analysis import BANDS, CapturedService, compare, costs, metrics, samples_from_jobs
 from . import public_corpus
+from .validity import from_events as prototype_validity
 
 SCHEMA="paper2-g3-replay-v1"
 PENDING="prototype-complete: replay pending"
@@ -113,7 +114,7 @@ def write_index(root,index):
 
 def verify_index(root,source_run_id=None,complete=True):
     root=Path(root);index=read(root/"INDEX.json")
-    if index.get("purpose")=="DIAGNOSTIC":raise ValueError("DIAGNOSTIC inputs excluded from G3 assessment")
+    if str(index.get("purpose","")).startswith("DIAGNOSTIC"):raise ValueError("DIAGNOSTIC inputs excluded from G3 assessment")
     if sha256_file(root/"INDEX.json")!=(root/"INDEX.sha256").read_text().strip():raise ValueError("replay index SHA-256 mismatch")
     if index["schema"]!=SCHEMA or not re.fullmatch(r"[0-9a-f]{40}",index["code_commit"]):raise ValueError("invalid replay index provenance")
     if source_run_id is not None and index["source_run_id"]!=str(source_run_id):raise ValueError("source run identity mismatch")
@@ -228,6 +229,7 @@ def postprocess_prototype(directory,output):
     events,jobs=directory/"prototype/events.csv",directory/"prototype/jobs.csv"
     violations=check(events,jobs,manifest)
     return dict(metrics=metrics(events,jobs,manifest,*info["window"]),violations=violations,
+                validity=prototype_validity(events,read(directory/"config.json"),info["window"]),
                 input_sha256=sha256_file(directory/"REPLAY_MANIFEST.json"))
 
 
@@ -247,6 +249,10 @@ def execute(root,run_id,output,source_run_id=None):
         seeds=info["seeds"])
     try:
         result["prototype"]=postprocess_prototype(directory,output/"prototype-check")
+        if not result["prototype"]["validity"]["passed"]:
+            result["status"]="INVALID: prototype validity guard"
+            save(output/"result.json",result);seal(output,"RESULT_MANIFEST.json")
+            return result
         for name,sample in (("primary","primary.csv"),("held_out","held-out.csv")):
             begin=time.perf_counter();e,m=simulate(directory,directory/sample,output/name)
             if read(m)["seeds"]!=info["seeds"]:raise ValueError("replay seed derivation differs from prototype")
@@ -260,7 +266,7 @@ def execute(root,run_id,output,source_run_id=None):
 
 
 def gather_records(index,records):
-    failures=[];table=[];expected={r["run_id"]:r for r in index["runs"]};seen=set()
+    failures=[];table=[];invalid=[];expected={r["run_id"]:r for r in index["runs"]};seen=set()
     for result in records:
         rid=result.get("run_id");run=expected.get(rid)
         if run is None or rid in seen:
@@ -271,6 +277,12 @@ def gather_records(index,records):
             if result.get(name)!=value:failures.append(dict(run_id=rid,check=name+" mismatch"))
         row=dict(run_id=rid,cell_id=run["cell_id"],replicate=run["replicate"])
         if result.get("execution_error"):failures.append(dict(run_id=rid,check="execution",detail=result["execution_error"]))
+        validity=result.get("prototype",{}).get("validity")
+        row["prototype_validity"]=validity
+        if not isinstance(validity,dict) or not validity.get("passed"):
+            invalid.append(rid);row["status"]="INVALID: prototype validity guard"
+            failures.append(dict(run_id=rid,check="prototype validity",validity=validity))
+            table.append(row);continue
         try:
             primary=compare(result["prototype"]["metrics"],result["primary"]["metrics"])
             held=compare(result["prototype"]["metrics"],result["held_out"]["metrics"],diagnostic=True)
@@ -295,7 +307,7 @@ def gather_records(index,records):
                 for kind in ("prototype","simulation")}
         aggregate["passed"]=len(members)==3 and not any(f.get("run_id") in {r["run_id"] for r in members} for f in failures)
         aggregates.append(aggregate)
-    return dict(status="passed" if expected and not failures else "failed",failures=failures,
+    return dict(status="invalid" if invalid else "passed" if expected and not failures else "failed",invalid_runs=invalid,failures=failures,
         per_repetition=sorted(table,key=lambda r:r["run_id"]),aggregates=aggregates,excluded_cells=index["excluded_cells"],
         bands=BANDS,source_run_id=index["source_run_id"],code_commit=index["code_commit"])
 
@@ -333,6 +345,8 @@ def gather(root,results,output,source_run_id=None):
         for name,item in row.get("primary",{}).get("checks",{}).items():
             lines.append("| "+" | ".join(str(x) for x in (row["run_id"],name,item["prototype"],item["simulation"],item["error"],item["limit"],item["passed"],row["held_out"]["checks"][name]["error"]))+" |")
     lines.extend(("","## Per-cell aggregates","",json.dumps(report["aggregates"],indent=2),
+                  "","## Prototype validity (INVALID repetitions have no G3 comparison)","",
+                  json.dumps([{k:r.get(k) for k in ("run_id","status","prototype_validity")} for r in report["per_repetition"]],indent=2),
                   "","## Deviation 2 exclusions","",json.dumps(report["excluded_cells"],indent=2),
                   "","## Every failing check","",json.dumps(report["failures"],indent=2)))
     (output/"G3_REPORT.md").write_bytes(("\n".join(lines)+"\n").encode())

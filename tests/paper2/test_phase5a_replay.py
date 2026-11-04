@@ -102,7 +102,7 @@ class Replay(unittest.TestCase):
         base={name:1.0 for name in analysis.BANDS};base["complete"]=True
         return [dict(run_id=r["run_id"],cell_id=r["cell_id"],replicate=r["replicate"],input_sha256=r["manifest_sha256"],
             code_commit=self.index["code_commit"],source_run_id="123",
-            **{kind:dict(metrics=copy.deepcopy(base),violations=[]) for kind in ("prototype","primary","held_out")})
+            **{kind:dict(metrics=copy.deepcopy(base),violations=[],**({"validity":dict(passed=True)} if kind=="prototype" else {})) for kind in ("prototype","primary","held_out")})
             for r in self.index["runs"]]
 
     def test_gather_pass_fail_missing_duplicate_and_diagnostic_logic(self):

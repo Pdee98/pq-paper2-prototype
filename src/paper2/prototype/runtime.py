@@ -15,6 +15,8 @@ from .corpus import cache_key, signed_parts, validate_entry, validate
 from .workers import Workers
 from .progress import Progress, phase_times, read_progress, peak_rss
 from .serialisation import CSVWriter, write_json
+from .dispatch_runtime import EvidenceList, SlicedCache
+from .validity import Validity
 
 PROTOTYPE_FIELDS=("monotonic_ns","scheduled_t","dispatcher_span_id","send_ns","receive_ns",
                   "worker_start_ns","worker_end_ns","occupancy_ns","primitive_ns","dispatch_to_start_ns",
@@ -354,10 +356,16 @@ class RealtimeModel(LegacyRealtimeModel):
                     b["reject_t"],b["reject_reason"],b["reject_reasons"])
             block=self.block_snapshots[bid]
         record=(self.row_count,self.t,event,qa,qb,busy,snapshot,block,tuple(extra.items()),now,scheduled,self.span_id)
+        self._record(record)
+        self.row_count+=1
+
+    def _record(self,record):
+        """Commit a captured immutable row; overridable after successor send."""
         if self.event_writer is None:self.rows.append(dict(zip(self.event_fields,self.serialize_event(record))))
         else:self.event_writer.writerow(record)
-        self.row_count+=1
-        if self.progress:self.progress.event(self.t,event,job.job_class if job else "",(qa,qb))
+        if self.progress:
+            _,t,event,qa,qb,_,job,*_=record
+            self.progress.event(t,event,job[1] if job else "",(qa,qb))
 
     def serialize_event(self,record):
         seq,t,event,qa,qb,busy,job,block,extra,now,scheduled,span=record
@@ -379,6 +387,179 @@ class RealtimeModel(LegacyRealtimeModel):
             cache_keys="validated corpus keys",payloads="decoded before epoch",
             online_structural_check="membership of immutable, prevalidated normalized transactions")
         return result
+
+
+# Preserve the exact pre-Deviation-5 decision/clock implementation for fixtures.
+PreDeviation5Model=RealtimeModel
+class CompletionFirstModel(PreDeviation5Model):
+    SLICE_NS=200_000
+
+    def __init__(self,*args,**kwargs):
+        self.completion_evidence=None;self.maintenance_context=None
+        self.pending_sends=set();self.active_span=None;self.slice_start=None
+        self.slice_stats={};self.servicing=False
+        super().__init__(*args,**kwargs)
+        self.validity=Validity(self.pool.k,self.pool.mode,self.pool.k_a)
+        if self.progress:self.progress.diagnostics=lambda:self.validity.report(self.validity.previous)
+        for name in ("verification_history","accepted_transactions","choose_overheads","costs"):
+            setattr(self,name,EvidenceList(self,getattr(self,name)))
+        for cache in (self.cache,self.negative):
+            cache.__class__=SlicedCache;cache.owner=self
+
+    def _record(self,record):
+        if self.completion_evidence is not None:
+            self.completion_evidence.append(("row",record))
+        else:self._commit_record(record)
+
+    def _commit_record(self,record):
+        _,t,event,qa,qb,busy,job,_,extra,*_=record
+        overrides=dict(extra)
+        self.validity.observe(t,event,overrides.get("q_admission",qa),overrides.get("q_block",qb),
+            overrides.get("busy_workers",busy),job[4] if job else None,
+            job[12] if job and event=="start" else None,job[13] if job and event=="end" else None)
+        super()._record(record)
+
+    def _admit_state(self,job):
+        Model._admit_state(self,job)
+        if self.progress and self.admission_checks[-1]["passed"]:
+            if self.completion_evidence is not None:
+                self.completion_evidence.append(("admitted",self.t))
+            else:
+                self.progress.advance(self.t);self.progress.counts["admitted"]+=1
+
+    def _lookup(self,cache,job,negative=False):
+        previous=self.maintenance_context
+        self.maintenance_context=(job,"negative" if negative else "positive")
+        try:return Model._lookup(self,cache,job,negative)
+        finally:self.maintenance_context=previous
+
+    def _start(self,job,worker):
+        if worker in self.pending_sends or worker in self.pool.running:
+            raise AssertionError("no prefetch: previous worker result not returned")
+        self.pending_sends.add(worker)
+        super()._start(job,worker)
+
+    def _receive(self,worker):
+        begin=time.monotonic_ns();reply=self.workers.pipes[worker].recv();receive=time.monotonic_ns()
+        self.ipc_ns+=receive-begin
+        if reply[0]!="result":raise RuntimeError("worker failure: "+str(reply))
+        _,identity,start,end,valid=reply
+        job=self.pool.running[worker]
+        if identity!=job.job_id:raise RuntimeError("worker replied to a different job")
+        if worker not in self.pending_sends:raise AssertionError("result without outstanding send")
+        self.pending_sends.remove(worker)
+        job.receive_ns,job.worker_start_ns,job.worker_end_ns=receive,start,end
+        job.occupancy_ns,job.primitive_ns=receive-job.send_ns,end-start
+        self.t=(receive-self.epoch)/1e9
+        job.service_time=self.t-job.start_t;job.outcome="valid" if valid else "invalid"
+        self.completion_evidence=[]
+        try:
+            # Includes cache/pool/ledger/eligibility and EWMA/busy-window updates
+            # in the simulator's exact order, followed by _dispatch/_start.
+            # All selected jobs have been sent before evidence commits below.
+            Model._finish(self,job)
+        finally:
+            pending=self.completion_evidence;self.completion_evidence=None
+            # Clock-handshake diagnostics do not affect selection. Fill their
+            # captured end snapshots only after the successor has been sent.
+            probe=min(next(r["probes"] for r in self.workers.clock_records
+                if r["worker_id"]==worker and r["phase"]=="before"),key=lambda r:r["uncertainty_ns"])
+            job.worker_clock_offset_estimate_ns=probe["offset_ns"]
+            job.worker_clock_uncertainty_ns=probe["uncertainty_ns"]
+            job.dispatch_to_worker_start_ns=start-probe["offset_ns"]-job.dispatch_decision_ns
+            for item in pending:
+                if item[0]=="row":
+                    record=item[1];snapshot=record[6]
+                    if snapshot and snapshot[0]==job.job_id:
+                        snapshot=snapshot[:-1]+(job.dispatch_to_worker_start_ns,)
+                        record=record[:6]+(snapshot,)+record[7:]
+                        self.job_snapshots[job.job_id]=snapshot
+                    self._commit_record(record)
+                elif item[0]=="append":list.append(item[1],item[2])
+                else:
+                    self.progress.advance(item[1]);self.progress.counts["admitted"]+=1
+
+    def _begin_span(self,kind):
+        self.span_id=len(self.spans);self.marker_ns=time.monotonic_ns()
+        self.active_span=(kind,self.marker_ns);self.slice_start=self.marker_ns
+        self._log("dispatcher_busy_start")
+
+    def _end_span(self):
+        kind,begin=self.active_span;end=time.monotonic_ns();self.marker_ns=end
+        self._log("dispatcher_busy_end")
+        self.spans.append(dict(id=self.span_id,start_ns=begin,end_ns=end,
+            start_t=(begin-self.epoch)/1e9,end_t=(end-self.epoch)/1e9,kind=kind))
+        stats=self.slice_stats.setdefault(kind,dict(count=0,total_ns=0,max_ns=0,over_target=0))
+        duration=end-begin;stats["count"]+=1;stats["total_ns"]+=duration
+        stats["max_ns"]=max(stats["max_ns"],duration);stats["over_target"]+=duration>self.SLICE_NS
+        self.active_span=None;self.span_id=""
+
+    def _handle(self,callback,*args):
+        self._begin_span(callback.__name__)
+        try:callback(*args)
+        finally:self._end_span()
+
+    def _checkpoint(self,reason):
+        if (self.epoch is None or self.active_span is None or self.servicing or
+                self.completion_evidence is not None or time.monotonic_ns()-self.slice_start<self.SLICE_NS):return
+        kind=self.active_span[0];self._end_span()
+        self.servicing=True
+        try:
+            begin=time.monotonic_ns()
+            ready=[w for w in self.pool.running if self.workers.pipes[w].poll()]
+            self.ipc_ns+=time.monotonic_ns()-begin
+            for worker in ready:self._handle(self._receive,worker)
+        finally:
+            self.servicing=False;self._begin_span(kind)
+
+    def _new_job(self,*args,**kwargs):
+        self._checkpoint("block_prepare")
+        return super()._new_job(*args,**kwargs)
+
+    def _enqueue(self,job):
+        Model._enqueue(self,job)
+        self._checkpoint("block_ready_or_admission")
+
+    def _admit_ready(self,job):
+        super()._admit_ready(job)
+        self._checkpoint("admission")
+
+    def _block_ready(self,bid,jobs,structurally_valid):
+        duration=0
+        for tx in self.block_transactions[bid]:
+            begin=time.monotonic_ns()
+            if id(tx) not in self.validated_tx:raise ValueError("unprepared block metadata")
+            duration+=time.monotonic_ns()-begin
+            self._checkpoint("block_structural")
+        self.costs.append(dict(kind="structural",items=len(self.block_transactions[bid])+1,duration_ns=duration))
+        if not structurally_valid:
+            self.blocks[bid]["structurally_rejected"]=True
+            self._log("struct_reject",block_id=bid);self._reject(bid,{"structural"});return
+        for job in jobs:
+            if job.job_class=="block_tx" and self._lookup(self.cache,job):
+                job.status="cache_hit";self.blocks[bid]["pending"]-=1
+            elif job.job_class=="block_tx" and self._coalesce(job):pass
+            else:self._enqueue(job)
+            # Warm-cache blocks have no _enqueue for their transactions, so
+            # they need this checkpoint as well as the cold enqueue path.
+            self._checkpoint("block_ready")
+
+    def extra_manifest(self,directory):
+        value=super().extra_manifest(directory)
+        value["prototype"]["completion_dispatch"]=dict(deviation=5,
+            completion_first=True,no_prefetch=True,slice_target_ns=self.SLICE_NS,slices=self.slice_stats,
+            atomic="selection-relevant completion/cache/pool/ledger transitions",
+            deferred="event-buffer/progress commits; verification/accepted/cost/choose evidence appends")
+        value["prototype"]["validity"]=self.validity.report((self.finish_ns-self.epoch)/1e9,final=True)
+        return value
+
+    def run(self):
+        super().run()
+        if self.progress:self.progress.phase("prototype_validity",
+            **self.validity.report((self.finish_ns-self.epoch)/1e9,final=True))
+
+
+RealtimeModel=CompletionFirstModel
 
 
 def run(config,corpus_path,*,sleep_seconds=0,stop_t=None,validated_sha256=None):

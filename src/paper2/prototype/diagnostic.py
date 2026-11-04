@@ -23,7 +23,7 @@ from .calibration import calibrate_once
 from .progress import read_progress, phase_times
 
 RUN_ID="paper2-g3-diag-v1"
-PURPOSE="DIAGNOSTIC"
+PURPOSE="DIAGNOSTIC v2"
 CELL0=dict(backend="xmss",k=1,policy="fifo",rho=.5,rate=1115.433019832252,
            period=.11475364071546823,B_ref=2230.866039664504,B_cold=1119.102530780535)
 # Diagnostic watchdogs only. Production preparation/serialisation caps remain unset.
@@ -33,6 +33,10 @@ RUN6=dict(pilot=75.90944254599981,calibration=535.1138159300003,
           presigning=2383.4357920620005,xmss_projection=1812.09324607673,
           ml_dsa_projection=404.23775415266033,
           signing_rate=350.45827532947476,keygen_seconds=.6823413615)
+ARM_DIAG_V1=dict(source_run_id="41717858838",native_build=163.714591007,
+    pilot=3.449869724,calibration=132.719399518,presigning=285.919883533,
+    preparation=5.959158616,prototype_window=105.629538191,serialisation=23.504438204,
+    self_tests=25.301,watchdog_start_to_prototype_exit=775.102868505)
 
 
 def diagnostic_parameters(rate,period,horizon=90):
@@ -57,6 +61,10 @@ def projection():
     verification=(tx+blocks)*.0004486
     measured_basis=RUN6["pilot"]+RUN6["calibration"]+signing+verification+110
     return dict(purpose=PURPOSE,source="run #6 artifact values supplied by author; no local stage-times.json",
+        paired_with_run=ARM_DIAG_V1["source_run_id"],
+        v2_projection=dict(basis=ARM_DIAG_V1,planning_margin=1.25,
+            projected_seconds_to_prototype_exit=1.25*ARM_DIAG_V1["watchdog_start_to_prototype_exit"],
+            caveat="DIAGNOSTIC v1 measured baseline plus a stated 25% planning margin; v2 overhead, drain and upload time UNVERIFIED; unchanged watchdogs, no validation caps set"),
         run_id=RUN_ID,transactions=tx,blocks=blocks,messages=tx+blocks,signing_keys=keys,size_probe_keys=1,
         observed_projection_margin=margin,presigning_seconds=signing,verification_estimate_seconds=verification,
         conservative_full_pilot_seconds=RUN6["pilot"],conservative_full_calibration_seconds=RUN6["calibration"],
@@ -253,6 +261,7 @@ def analyse(root,output,source_run_id):
                 block_arrival_t=release["release_t"],scheduled_tx_arrival_t=arrivals[tx],
                 admission_complete_before_block=finish is not None and finish<=release["release_t"]))
     report=dict(purpose=PURPOSE,excluded_from_G3=True,source_run_id=str(source_run_id),drain_complete=drain,
+        prototype_validity=proto["validity"],
         prototype_violations=proto["violations"],phase_seconds=timing,occupancy_by_class=occupancy,
         row_counts=dict(events=p["event_buffer"]["rows"],jobs=len(records),spans=len(spans_raw)),
         peak_parent_rss_bytes=max((r.get("peak_parent_rss_bytes",0) for r in phases),default=0),
@@ -260,8 +269,8 @@ def analyse(root,output,source_run_id):
         calibration_dispatcher_utilisation=cell["dispatcher_utilisation"],measurement_dispatcher_busy_fraction=observed_guard,
         idle_while_waiting_seconds=idle,idle_covered_seconds=covered,idle_uncovered_seconds=max(0,idle-covered),
         public_corpus=public_corpus.inventory(root),
-        next_action="AUTHOR REVIEW: preparation/serialisation caps may be recorded; not applied" if eligible and not proto["violations"] else "STOP: report to author; do not prepare run #7",
-        recommended_caps_seconds={name:2*timing[name] for name in ("preparation","serialisation")} if eligible and not proto["violations"] else None)
+        next_action="AUTHOR REVIEW: preparation/serialisation caps may be recorded; not applied" if eligible and proto["validity"]["passed"] and not proto["violations"] else "STOP: report to author; do not prepare run #7",
+        recommended_caps_seconds={name:2*timing[name] for name in ("preparation","serialisation")} if eligible and proto["validity"]["passed"] and not proto["violations"] else None)
     for name,rows in (("per-second.csv",seconds),("admission-block-lags.csv",lags)):
         with (output/name).open("x",newline="") as stream:
             if rows:

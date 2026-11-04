@@ -183,7 +183,7 @@ class Deviation4(unittest.TestCase):
             held=replay.samples_from_jobs(e.parent/"jobs.csv",root/"held.csv","sleep","concurrency-k1-rep0")
             inputs=root/"inputs";cell=dict(backend="sleep",k=1,policy="fifo",rho=.5,rate=2,period=1,dispatcher_utilisation=.1)
             digest=replay.create_packet(inputs/diagnostic.RUN_ID,cfg,cp,dict(events=str(e),manifest=str(m)),held,cell,0)
-            replay.save(inputs/"DIAGNOSTIC_INDEX.json",dict(purpose="DIAGNOSTIC",run_id=diagnostic.RUN_ID,
+            replay.save(inputs/"DIAGNOSTIC_INDEX.json",dict(purpose=diagnostic.PURPOSE,run_id=diagnostic.RUN_ID,
                 code_commit=replay.read(m)["git"]["commit"],source_run_id="123",packet_sha256=digest))
             (inputs/"DIAGNOSTIC_INDEX.sha256").write_text(sha256_file(inputs/"DIAGNOSTIC_INDEX.json")+"\n")
             # Prepare starts at the current bundle HEAD, discovers the recorded
@@ -194,7 +194,7 @@ class Deviation4(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,"checkout differs"):
                     diagnostic.verify_checkout(index)
             report=diagnostic.analyse(inputs,root/"analysis","123")
-            self.assertEqual(report["purpose"],"DIAGNOSTIC")
+            self.assertEqual(report["purpose"],"DIAGNOSTIC v2")
             self.assertEqual(report["prototype_violations"],[])
             self.assertNotIn("status",report)
             self.assertFalse((root/"analysis/G3_STATUS.json").exists())

@@ -121,8 +121,12 @@ class Dispatcher(unittest.TestCase):
                                  [("admission:0","0"),("admission:1","1")])
             self.assertEqual(decisions(logs[0]),decisions(logs[1]))
             self.assertEqual(logs[0].read_bytes(),logs[1].read_bytes())
-            for name in ("jobs.csv","dispatcher_spans.json"):
+            for name in ("jobs.csv",):
                 self.assertEqual((logs[0].parent/name).read_bytes(),(logs[1].parent/name).read_bytes())
+            # Deviation 5 adds callback kinds, retaining all clock/id fields.
+            old_spans=json.loads((logs[0].parent/"dispatcher_spans.json").read_text())
+            new_spans=json.loads((logs[1].parent/"dispatcher_spans.json").read_text())
+            self.assertEqual(old_spans,[{k:v for k,v in s.items() if k!="kind"} for s in new_spans])
             sample=analysis.samples_from_jobs(logs[1].parent/"jobs.csv",root/"samples.csv","sleep","test")
             se,sm=analysis.paired(dict(data["workload"],output_dir=str(root/"replay")),cp,sample,"sleep",0,0)
             self.assertEqual(check(se,se.parent/"jobs.csv",sm),[])
