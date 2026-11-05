@@ -23,8 +23,8 @@ from .calibration import calibrate_once
 from .progress import read_progress, phase_times
 from .pause_attribution import summarise as summarise_pauses, estimate_overhead
 
-RUN_ID="paper2-g3-diag-v1"
-PURPOSE="DIAGNOSTIC v2"
+RUN_ID="paper2-g3-diag-v3"
+PURPOSE="DIAGNOSTIC v3"
 CELL0=dict(backend="xmss",k=1,policy="fifo",rho=.5,rate=1115.433019832252,
            period=.11475364071546823,B_ref=2230.866039664504,B_cold=1119.102530780535)
 # Diagnostic watchdogs only. Production preparation/serialisation caps remain unset.
@@ -51,7 +51,7 @@ def fixed_cell(reference,dispatch_cost):
                 fresh_calibration_reference=reference)
 
 
-def projection():
+def projection_historical():
     """Exact generator counts; author-supplied run #6 timings, not inferred shares."""
     workload=generate_workload(diagnostic_parameters(1115.433019832252,.11475364071546823))
     tx=len(workload["transactions"]);blocks=len(workload["blocks"])
@@ -93,7 +93,7 @@ def bounded_presign(parameters,processes,destination,stage):
     return runner.fresh(presign,(parameters,processes,destination),TIMEOUTS[stage])
 
 
-def collect(root):
+def collect_historical(root):
     root=Path(root).resolve()
     if root==ROOT or ROOT in root.parents:raise ValueError("diagnostic output must be outside checkout")
     preflight()
@@ -141,6 +141,7 @@ def collect(root):
                 phase_timeouts=TIMEOUTS,partial_dir=root/"timeout-evidence")
             inputs=root/"replay-inputs";packet=inputs/RUN_ID
             digest=replay.create_packet(packet,cfg,cp,proto,held,cell,0)
+            state["arm_corpus_audit"]=replay.read(packet/"info.json")["arm_corpus_audit"]
             index=dict(purpose=PURPOSE,run_id=RUN_ID,code_commit=state["code_commit"],source_run_id=state["source_run_id"],
                        packet_sha256=digest,excluded_from_G3=True)
             replay.save(inputs/"DIAGNOSTIC_INDEX.json",index)
@@ -152,6 +153,16 @@ def collect(root):
     finally:
         # Per-file corpus hashes and compressed/uncompressed totals precede upload.
         runner.save(root/"protocol.json",state)
+
+
+def projection():
+    from .cycle_diagnostic import projection as v3_projection
+    return v3_projection()
+
+
+def collect(root):
+    from .cycle_diagnostic import collect as v3_collect
+    return v3_collect(root)
 
 
 def verify(root,source_run_id):
@@ -238,13 +249,13 @@ def analyse(root,output,source_run_id):
         n=r["block_tx_hit"]+r["block_tx_miss"]
         r["block_tx_hit_rate"]=r["block_tx_hit"]/n if n else None
         r["dispatcher_busy_fraction"]=overlap(r["second"],r["second"]+1,spans)
-        if first_drop is None and n and r["block_tx_hit_rate"]<.5:first_drop=r["second"]
+        if first_drop is None and n and r["block_tx_hit_rate"]<.5 and 30<=r['second']<90:first_drop=r["second"]
     phases=read_progress(packet/"prototype/progress.jsonl");timing=phase_times(phases)
     observed_guard=overlap(30,90,spans)/60
     info=replay.read(packet/"info.json");cell=info["cell"]
     hit=proto["metrics"]["block_tx_cache_hit_rate"]
     drain=not p["incomplete"]
-    eligible=may_prepare_validation(drain,cell["dispatcher_utilisation"],observed_guard,hit,first_drop,proto["violations"])
+    eligible=may_prepare_validation(drain,cell["dispatcher_utilisation"],observed_guard,hit,first_drop,proto["violations"]) and proto['validity']['passed']
     occupancy={}
     for c in ("admission","block_tx","block_sig"):
         jobs=[j for j in records if j["job_class"]==c and "occupancy_ns" in j]

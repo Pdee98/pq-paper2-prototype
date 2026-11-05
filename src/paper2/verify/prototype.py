@@ -1,4 +1,8 @@
-"""Independent real-byte/clock/span checks. No model objects or prototype helper imports."""
+"""Independent byte/clock/span checks; compact transport decoding is shared.
+
+Cache-key, signed-field and block checks below are independently implemented.
+Only raw signature-ID and wire-leaf derivations rely on the ARM audit receipt.
+"""
 
 import hashlib
 import json
@@ -42,6 +46,11 @@ def inspect(rows,jobs,data,manifest):
         bad("prototype_schema","missing real-time provenance");return errors,keys,intervals
     base=Path(manifest).parent
     corpus=load(base/p["corpus_path"],p["corpus_sha256"])
+    compact=corpus.get("version","").startswith("paper2-compact-public-corpus-v2")
+    if compact:
+        # Decode public columns only; independent key/payload checks remain here.
+        from src.paper2.prototype.compact import expand
+        corpus=expand(corpus)
     spans=load(base/p["spans"]["path"],p["spans"]["sha256"]) if runtime else []
     epoch=p["epoch_ns"] if runtime else 0;context=corpus["context"]
     anchors={}
@@ -79,13 +88,22 @@ def inspect(rows,jobs,data,manifest):
                     separators=(",",":"),allow_nan=False).encode()).hexdigest()
         if commit!=tx["transaction_id"]:bad("real_payload","unsigned metadata commitment mismatch",tx_id=identity)
         obj=Transaction(sender=tx["sender"],receiver=tx["receiver"],amount=tx["amount"],timestamp=tx["timestamp"],
-                        sender_id=tx["sender_id"],transaction_id=tx["transaction_id"],signature=bytes.fromhex(entry["signature_hex"]))
+                        sender_id=tx["sender_id"],transaction_id=tx["transaction_id"],signature=(bytes(entry["signature_size"]) if compact else bytes.fromhex(entry["signature_hex"])))
         payload=bytes.fromhex(entry["payload_hex"]);public=bytes.fromhex(entry["public_key_hex"])
         if payload!=obj.signed_payload() or obj.serialized_size()!=tx["size_bytes"]:
             bad("real_payload","frozen signed bytes/wire size mismatch",tx_id=identity)
-        parts=[b"paper2-real-cache-key-v1"]+[context[k].encode() for k in ("domain_tag","chain_id","alg_id","param_set_id")]
-        parts += [public,payload,tx["nonce"].to_bytes(8,"big"),obj.signature]
-        key=hashlib.sha256(b"".join(len(v).to_bytes(8,"big")+v for v in parts)).hexdigest()
+        if corpus.get("cache_key_version")=="paper2-cache-key-v2":
+            if not compact and hashlib.sha256(obj.signature).hexdigest()!=tx["signature_id"]:
+                bad("real_cache_key","signature_id differs from raw signature",tx_id=identity)
+            if not compact and entry.get("wire_leaf_hash")!=hashlib.sha256(b"PQ_BLOCKCHAIN_SIM_TX_MERKLE_V1"+obj.serialize()).hexdigest():
+                bad("real_payload","transaction-wire Merkle leaf mismatch",tx_id=identity)
+            parts=["paper2-cache-key-v2"]+[context[k] for k in ("domain_tag","chain_id","alg_id","param_set_id")]
+            parts += [tx["public_key_id"],dict(payload_hex=payload.hex(),nonce=tx["nonce"]),tx["signature_id"]]
+            key=hashlib.sha256(json.dumps(parts,sort_keys=True,ensure_ascii=True,separators=(",",":"),allow_nan=False).encode()).hexdigest()
+        else:
+            parts=[b"paper2-real-cache-key-v1"]+[context[k].encode() for k in ("domain_tag","chain_id","alg_id","param_set_id")]
+            parts += [public,payload,tx["nonce"].to_bytes(8,"big"),obj.signature]
+            key=hashlib.sha256(b"".join(len(v).to_bytes(8,"big")+v for v in parts)).hexdigest()
         keys[identity]=key
         if key!=entry["cache_key"] or hashlib.sha256(public).hexdigest()!=tx["public_key_id"]:
             bad("real_cache_key","corpus key/public identity mismatch",tx_id=identity)
@@ -94,6 +112,19 @@ def inspect(rows,jobs,data,manifest):
     previous_hash="0"*64
     for index,spec in enumerate(corpus["workload"]["blocks"]):
         bid=spec["block_id"];fields=corpus["block_objects"][bid]
+        if compact:
+            # Raw leaf derivation moved to ARM; independently fold its committed
+            # leaves and bind the resulting root to frozen block signed fields.
+            level=[corpus["transactions"][t]["wire_leaf_hash"] for t in spec["tx_ids"]]
+            if not level:level=[hashlib.sha256(b"").hexdigest()]
+            while len(level)>1:
+                if len(level)%2:level.append(level[-1])
+                level=[hashlib.sha256((level[i]+level[i+1]).encode()).hexdigest() for i in range(0,len(level),2)]
+            expected_hash=hashlib.sha256((str(fields["index"])+str(fields["timestamp"])+level[0]+fields["previous_hash"]+str(fields["proposer_id"])+str(fields["nonce"])).encode()).hexdigest()
+            if (fields["index"]!=index or fields["previous_hash"]!=previous_hash or fields.get("merkle_root")!=level[0] or fields["hash"]!=expected_hash or bytes.fromhex(corpus["blocks"][bid]["payload_hex"])!=expected_hash.encode()):
+                bad("real_payload","compact block chain/signed bytes mismatch",block_id=bid)
+            previous_hash=expected_hash
+            continue
         objects=[]
         for identity in spec["tx_ids"]:
             tx=corpus["workload"]["transactions"][identity]

@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from src.paper2.model.engine import run_model
 from src.paper2.prototype import analysis,corpus,diagnostic,replay,runtime
-CompletionFirstModel=runtime.RealtimeModel
+CompletionFirstModel=runtime.CompletionFirstModel
 from src.paper2.prototype.validity import Validity,from_events
 from src.paper2.verify.invariants import check
 from tests.paper2._support import config
@@ -72,7 +72,7 @@ class Deviation5(unittest.TestCase):
             with self.subTest(policy=policy),tempfile.TemporaryDirectory() as td:
                 root=Path(td);doc=corpus.build(self.fixture(policy,2),"sleep");cp=corpus.write(doc,root/"corpus.json")
                 logs=[]
-                for label,kind in (("old",runtime.PreDeviation5Model),("new",runtime.RealtimeModel)):
+                for label,kind in (("old",runtime.PreDeviation5Model),("new",runtime.CompletionFirstModel)):
                     clock=Clock()
                     with clock.patches():
                         e,m=run_model(dict(doc["workload"],output_dir=str(root/label)),
@@ -93,7 +93,7 @@ class Deviation5(unittest.TestCase):
             root=Path(td);doc=corpus.build(self.fixture(dict(name="fifo")),"sleep");cp=corpus.write(doc,root/"corpus.json")
             clock=Clock();holder=[];observed=[]
             def create(cfg):
-                m=runtime.RealtimeModel(cfg,cp,.01);holder.append(m);return m
+                m=runtime.CompletionFirstModel(cfg,cp,.01);holder.append(m);return m
             def sending(message):
                 m=holder[0]
                 if m.completion_evidence is not None:
@@ -171,11 +171,11 @@ class Deviation5(unittest.TestCase):
         self.assertNotIn("primary",r["per_repetition"][0])
 
     def test_diagnostic_v2_retains_workload_identity_and_stop_rules(self):
-        self.assertEqual(diagnostic.PURPOSE,"DIAGNOSTIC v2")
-        self.assertEqual(diagnostic.RUN_ID,"paper2-g3-diag-v1")
+        self.assertEqual(diagnostic.PURPOSE,"DIAGNOSTIC v3")
+        self.assertEqual(diagnostic.RUN_ID,"paper2-g3-diag-v3")
         self.assertEqual(diagnostic.CELL0["rate"],1115.433019832252)
         self.assertFalse(diagnostic.may_prepare_validation(True,.2,.3,.95,1,[]))
-        p=diagnostic.projection()
+        p=diagnostic.projection_historical()
         self.assertEqual(p["paired_with_run"],"41717858838")
         self.assertAlmostEqual(p["v2_projection"]["projected_seconds_to_prototype_exit"],968.87858563125)
         self.assertEqual(p["diagnostic_stage_timeouts_seconds"],diagnostic.TIMEOUTS)
@@ -191,7 +191,7 @@ class Deviation5(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root=Path(td);cfg=self.fixture(dict(name="fifo"));cfg["block_times"]=[0,1.1]
             doc=corpus.build(cfg,"sleep");cp=corpus.write(doc,root/"corpus.json");clock=Clock()
-            with clock.patches():e,m=runtime.run(dict(doc["workload"],output_dir=str(root/"run")),cp)
+            with clock.patches(),patch.object(runtime,'RealtimeModel',runtime.CompletionFirstModel):e,m=runtime.run(dict(doc["workload"],output_dir=str(root/"run")),cp)
             phases=read_progress(e.parent/"progress.jsonl")
             self.assertTrue(all("prototype_validity" in r for r in phases if r["phase"]=="second"))
             guard=next(r for r in phases if r["phase"]=="prototype_validity")

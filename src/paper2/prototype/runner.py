@@ -147,7 +147,7 @@ def merge_samples(paths,target):
                 writer.writerows(reader)
 
 
-def execute(root):
+def execute_occupancy_historical(root):
     if ENGINEERING_CAPS is None:raise RuntimeError("STOP: validation awaits ARM diagnostic and preparation/serialisation caps")
     root=Path(root).resolve()
     if ROOT==root or ROOT in root.parents:raise ValueError("runner output must be outside checkout")
@@ -272,6 +272,7 @@ def execute(root):
                 entry=next(r for r in index["runs"] if r["run_id"]==rid)
                 entry["manifest_sha256"]=replay.create_packet(inputs/rid,config,path,proto,
                     calibrations[backend][cell["k"]]["occupancy_samples"],cell,rep)
+                state.setdefault("arm_corpus_audits",{})[rid]=replay.read(inputs/rid/"info.json")["arm_corpus_audit"]
                 replay.write_index(inputs,index)
                 for phase,seconds in proto["phase_seconds"].items():
                     stage="prototype" if phase=="prototype window" else phase
@@ -321,6 +322,11 @@ def record_host(root):
         try:record[name]=Path(file).read_text()
         except OSError as e:record[name]="UNAVAILABLE: "+str(e)
     save(root/"host.json",record)
+
+
+def execute(root):
+    from .cycle_runner import execute as cycle_execute
+    return cycle_execute(root)
 
 
 def hash_artifacts(root):

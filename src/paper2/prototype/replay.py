@@ -99,8 +99,8 @@ def initialize(root,cells,excluded,code_commit,source_run_id):
     if root.exists():raise FileExistsError("replay input root must be new")
     if not re.fullmatch(r"[0-9a-f]{40}",code_commit):raise ValueError("full source bundle commit required")
     root.mkdir(parents=True)
-    runs=[dict(run_id=f"cell{i}-r{rep}",cell_id=i,replicate=rep,manifest_sha256=None)
-          for i,cell in enumerate(cells) if cell["dispatcher_utilisation"]<=.5 for rep in range(3)]
+    runs=[dict(run_id=('secondary-regime' if cell.get('role')=='secondary' else f"cell{i}-r{rep}"),cell_id=i,replicate=rep,manifest_sha256=None)
+          for i,cell in enumerate(cells) if cell["dispatcher_utilisation"]<=.5 for rep in range(1 if cell.get('role')=='secondary' else 3)]
     index=dict(schema=SCHEMA,code_commit=code_commit,source_run_id=str(source_run_id),
                cells=cells,excluded_cells=excluded,runs=runs,status="prototype collection in progress")
     write_index(root,index)
@@ -118,7 +118,7 @@ def verify_index(root,source_run_id=None,complete=True):
     if sha256_file(root/"INDEX.json")!=(root/"INDEX.sha256").read_text().strip():raise ValueError("replay index SHA-256 mismatch")
     if index["schema"]!=SCHEMA or not re.fullmatch(r"[0-9a-f]{40}",index["code_commit"]):raise ValueError("invalid replay index provenance")
     if source_run_id is not None and index["source_run_id"]!=str(source_run_id):raise ValueError("source run identity mismatch")
-    expected={f"cell{i}-r{r}":(i,r) for i,c in enumerate(index["cells"]) if c["dispatcher_utilisation"]<=.5 for r in range(3)}
+    expected={('secondary-regime' if c.get('role')=='secondary' else f"cell{i}-r{r}"):(i,r) for i,c in enumerate(index["cells"]) if c["dispatcher_utilisation"]<=.5 for r in range(1 if c.get('role')=='secondary' else 3)}
     excluded=[dict(cell=c,reason=EXCLUSION) for c in index["cells"] if c["dispatcher_utilisation"]>.5]
     if index["excluded_cells"]!=excluded:raise ValueError("exclusion/guard mismatch")
     if not expected or len(index["runs"])!=len(expected):raise ValueError("missing/duplicate expected repetitions")
@@ -133,7 +133,7 @@ def verify_index(root,source_run_id=None,complete=True):
     return index
 
 
-def create_packet(directory,config,corpus_path,prototype,held_out,cell,replicate,window=(30,90)):
+def create_packet(directory,config,corpus_path,prototype,held_out,cell,replicate,window=(30,90),shared_public=None):
     """Copy public inputs/evidence only; check privacy before creating payloads."""
     directory=Path(directory);doc=read(corpus_path);meta=read(prototype["manifest"])
     if meta.get("prototype",{}).get("mode")!="real-time-v1" or meta["config"].get("prototype",{}).get("mode")!="real-time-v1":
@@ -148,7 +148,7 @@ def create_packet(directory,config,corpus_path,prototype,held_out,cell,replicate
     info=dict(cell=cell,replicate=replicate,backend=doc["backend"],mapped=costs(meta),seeds=meta["seeds"],window=list(window),
         source_commit=meta["git"]["commit"],corpus_sha256=meta["prototype"]["corpus_sha256"],
         prototype_checks=dict(mode="prototype",status="pending deterministic replay",
-            provenance="full real-byte checker retained; public signed artifact verified before checking"))
+            provenance="compact public artifact hash-verified before full checker; raw signature-ID and wire-Merkle derivations audited on ARM"))
     values={"config.json":config,"workload.json":doc["workload"],"keys.json":keys,
             "info.json":info}
     originals={"prototype/events.csv":Path(prototype["events"]),
@@ -161,23 +161,40 @@ def create_packet(directory,config,corpus_path,prototype,held_out,cell,replicate
     for name in ("gc_pauses.json","long_spans.json"):
         path=Path(prototype["events"]).parent/name
         if path.is_file():originals["prototype/"+name]=path
-        elif meta["prototype"].get("pause_attribution"):raise ValueError("missing pause attribution evidence: "+name)
+        elif meta["prototype"].get("pause_attribution") and (name=='gc_pauses.json' or meta['prototype']['pause_attribution'].get('detailed',True)):
+            raise ValueError("missing pause attribution evidence: "+name)
     callback_cost=Path(prototype["events"]).parent/"callback_overhead.json"
     if callback_cost.is_file():originals["prototype/callback_overhead.json"]=callback_cost
     for value in values.values():audit_value(value)
     for path in originals.values():audit_file(path)
     with Path(held_out).open(newline="",encoding="utf-8") as stream:
         for row in csv.DictReader(stream):
-            if not row["backend"].startswith(doc["backend"]+":") or not row.get("source","").startswith(f"concurrency-k{cell['k']}-rep"):
+            source=(f"concurrency-cycle-k{cell['k']}-rep" if cell.get('g3_input_version')==6 else f"concurrency-k{cell['k']}-rep")
+            if not row["backend"].startswith(doc["backend"]+":") or not row.get("source","").startswith(source):
                 raise ValueError("held-out calibration backend/k mismatch")
     if directory.exists():raise FileExistsError("replay packet already exists")
     directory.mkdir(parents=True)
     existing=public_corpus.inventory(directory.parent)["files"]
-    info["public_corpus"]=public_corpus.write_archive(doc,directory/"prototype/public-corpus.zip",existing)
+    destination=directory/'prototype/public-corpus.zip'
+    if shared_public is not None:
+        destination=safe_file(directory.parent,shared_public);info['public_corpus_ref']=shared_public
+    if destination.exists():
+        info['public_corpus']=public_corpus.validate_archive(destination)
+        import zipfile
+        from .compact import unpack
+        with zipfile.ZipFile(destination) as archive:prior=unpack(archive.read('corpus.bin'))
+        if prior['arm_audit']['full_corpus_sha256']!=meta['prototype']['corpus_sha256']:raise ValueError('shared compact corpus differs from full corpus')
+    else:info["public_corpus"]=public_corpus.write_archive(doc,destination,existing,full_path=corpus_path)
+    from .compact import audit_full
+    info["arm_corpus_audit"]=audit_full(doc,corpus_path)
     for name,value in values.items():save(directory/name,value)
     for name,path in originals.items():
         target=directory/name;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(path,target)
-    samples_from_jobs(originals["prototype/jobs.csv"],directory/"primary.csv",doc["backend"],"validation")
+    if cell.get('g3_input_version')==6:
+        shutil.copyfile(held_out,directory/'primary.csv')
+        info['service_input']='held-out representative-traffic calibration cycles (both legacy comparison slots)'
+        save(directory/'info.json',info)
+    else:samples_from_jobs(originals["prototype/jobs.csv"],directory/"primary.csv",doc["backend"],"validation")
     for path in directory.rglob("*"):
         if path.is_file():audit_file(path)
     seal(directory,"REPLAY_MANIFEST.json")
@@ -198,7 +215,10 @@ def verify(root,source_run_id=None):
     index=verify_index(root,source_run_id)
     allowed={"INDEX.json","INDEX.sha256"}
     for run in index["runs"]:
-        directory,_=packet(root,index,run)
+        directory,info=packet(root,index,run)
+        if info.get('public_corpus_ref'):
+            reference=safe_file(root,info['public_corpus_ref']);public_corpus.validate_archive(reference,info['public_corpus'])
+            allowed.add(info['public_corpus_ref'])
         for path in directory.rglob("*"):
             if path.is_file():audit_file(path)
         allowed.update(p.relative_to(root).as_posix() for p in directory.rglob("*") if p.is_file())
@@ -210,7 +230,20 @@ def verify(root,source_run_id=None):
 class ReplayModel(Model):
     def __init__(self,config,directory,sample):
         self.directory=Path(directory);self.keys=read(self.directory/"keys.json")
-        super().__init__(config)
+        if config.get('g3_input_version')==6:
+            info=read(self.directory/'info.json')
+            archive=(safe_file(self.directory.parent,info['public_corpus_ref']) if info.get('public_corpus_ref') else self.directory/'prototype/public-corpus.zip')
+            public_corpus.validate_archive(archive,info['public_corpus'])
+            import zipfile
+            from .compact import unpack,expand
+            with zipfile.ZipFile(archive) as z:public=expand(unpack(z.read('corpus.bin')))
+            computed={name:dict(cache_key=e['cache_key'],size_bytes=public['workload']['transactions'][name]['size_bytes']) for name,e in public['transactions'].items()}
+            if computed!=self.keys:raise ValueError('replay key table differs from recomputed compact v2 keys')
+            if public['workload']['transactions']!=config['transactions'] or public['workload']['blocks']!=config['blocks']:raise ValueError('replay compact workload mismatch')
+            self.keys=computed
+        from .cycle_protocol import model_config
+        super().__init__(model_config(config))
+        self.config.update({k:v for k,v in config.items() if k not in model_config(config)})
         self.service=CapturedService(sample,read(self.directory/"info.json")["backend"])
         self.config["prototype"]=dict(mode="precomputed-key-replay-v1")
     def _key(self,tx):return self.keys[tx["tx_id"]]["cache_key"]
@@ -234,8 +267,13 @@ def postprocess_prototype(directory,output):
     manifest=public_corpus.checker_manifest(directory,output)
     events,jobs=directory/"prototype/events.csv",directory/"prototype/jobs.csv"
     violations=check(events,jobs,manifest)
+    config=read(directory/'config.json')
+    if config.get('g3_input_version')==6:
+        from .cycle_validity import from_logs
+        validity=from_logs(events,jobs,config,manifest,info['window'])
+    else:validity=prototype_validity(events,config,info['window'])
     return dict(metrics=metrics(events,jobs,manifest,*info["window"]),violations=violations,
-                validity=prototype_validity(events,read(directory/"config.json"),info["window"]),
+                validity=validity,
                 input_sha256=sha256_file(directory/"REPLAY_MANIFEST.json"))
 
 
@@ -255,7 +293,7 @@ def execute(root,run_id,output,source_run_id=None):
         seeds=info["seeds"])
     try:
         result["prototype"]=postprocess_prototype(directory,output/"prototype-check")
-        if not result["prototype"]["validity"]["passed"]:
+        if not result["prototype"]["validity"]["passed"] and info['cell'].get('role')!='secondary':
             result["status"]="INVALID: prototype validity guard"
             save(output/"result.json",result);seal(output,"RESULT_MANIFEST.json")
             return result
@@ -265,7 +303,7 @@ def execute(root,run_id,output,source_run_id=None):
             sim=dict(metrics=metrics(e,e.parent/"jobs.csv",m,*info["window"]),
                      violations=check(e,e.parent/"jobs.csv",m),elapsed=time.perf_counter()-begin)
             result[name]=sim
-            result[name+"_comparison"]=compare(result["prototype"]["metrics"],sim["metrics"],diagnostic=name=="held_out")
+            if info['cell'].get('role')!='secondary':result[name+"_comparison"]=compare(result["prototype"]["metrics"],sim["metrics"],diagnostic=name=="held_out")
     except Exception as exc:result["execution_error"]=str(exc)
     save(output/"result.json",result);seal(output,"RESULT_MANIFEST.json")
     return result
@@ -282,6 +320,14 @@ def gather_records(index,records):
                            ("source_run_id",index["source_run_id"]),("cell_id",run["cell_id"]),("replicate",run["replicate"])):
             if result.get(name)!=value:failures.append(dict(run_id=rid,check=name+" mismatch"))
         row=dict(run_id=rid,cell_id=run["cell_id"],replicate=run["replicate"])
+        if index['cells'][run['cell_id']].get('role')=='secondary':
+            from .cycle_protocol import regime_category
+            row.update(role='secondary',category=regime_category(result.get('prototype',{}).get('metrics',{}).get('block_tx_cache_hit_rate'),result.get('primary',{}).get('metrics',{}).get('block_tx_cache_hit_rate')),
+                prototype_hit=result.get('prototype',{}).get('metrics',{}).get('block_tx_cache_hit_rate'),simulation_hit=result.get('primary',{}).get('metrics',{}).get('block_tx_cache_hit_rate'))
+            for name in ('prototype','primary','held_out'):
+                if result.get(name,{}).get('violations'):row.setdefault('diagnostic_errors',[]).append(dict(source=name,violations=result[name]['violations']))
+            if result.get('execution_error'):row['diagnostic_errors']=[result['execution_error']]
+            table.append(row);continue
         if result.get("execution_error"):failures.append(dict(run_id=rid,check="execution",detail=result["execution_error"]))
         validity=result.get("prototype",{}).get("validity")
         row["prototype_validity"]=validity
@@ -304,6 +350,7 @@ def gather_records(index,records):
     for rid in sorted(expected.keys()-seen):failures.append(dict(run_id=rid,check="missing repetition"))
     aggregates=[]
     for cell_id,cell in enumerate(index["cells"]):
+        if cell.get('role')=='secondary':continue
         if cell["dispatcher_utilisation"]>.5:continue
         members=[r for r in table if r["cell_id"]==cell_id and "primary" in r]
         aggregate=dict(cell_id=cell_id,cell=cell,repetitions=len(members),metrics={})
@@ -314,6 +361,7 @@ def gather_records(index,records):
         aggregate["passed"]=len(members)==3 and not any(f.get("run_id") in {r["run_id"] for r in members} for f in failures)
         aggregates.append(aggregate)
     return dict(status="invalid" if invalid else "passed" if expected and not failures else "failed",invalid_runs=invalid,failures=failures,
+        secondary_regime=[r for r in table if r.get('role')=='secondary'],
         per_repetition=sorted(table,key=lambda r:r["run_id"]),aggregates=aggregates,excluded_cells=index["excluded_cells"],
         bands=BANDS,source_run_id=index["source_run_id"],code_commit=index["code_commit"])
 
@@ -351,6 +399,8 @@ def gather(root,results,output,source_run_id=None):
         for name,item in row.get("primary",{}).get("checks",{}).items():
             lines.append("| "+" | ".join(str(x) for x in (row["run_id"],name,item["prototype"],item["simulation"],item["error"],item["limit"],item["passed"],row["held_out"]["checks"][name]["error"]))+" |")
     lines.extend(("","## Per-cell aggregates","",json.dumps(report["aggregates"],indent=2),
+                  "","## Secondary regime (qualitative, excluded from primary G3 bands)","",
+                  json.dumps(report.get("secondary_regime",[]),indent=2),
                   "","## Prototype validity (INVALID repetitions have no G3 comparison)","",
                   json.dumps([{k:r.get(k) for k in ("run_id","status","prototype_validity")} for r in report["per_repetition"]],indent=2),
                   "","## Deviation 2 exclusions","",json.dumps(report["excluded_cells"],indent=2),

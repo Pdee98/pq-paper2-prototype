@@ -67,10 +67,12 @@ class LegacyRealtimeModel(Model):
         if config.get("structural_cost",0) or config.get("state_cost",0):
             raise ValueError("prototype measures actual costs; simulated costs must be zero")
         config=dict(config,service=dict(mode="constant",seconds={c:dict(valid=0,bit_flip=0,random_bytes=0) for c in JOB_CLASSES}))
-        super().__init__(config)
+        from .cycle_protocol import model_config
+        super().__init__(model_config(config))
+        self.config.update({k:v for k,v in config.items() if k not in model_config(config)})
         self.ledger=ObservedLedger(self.ledger,self)
         self.config["prototype"]=dict(mode="real-time-v1",backend=self.corpus["backend"],
-            cache_key_version="paper2-real-cache-key-v1",sleep_seconds=sleep_seconds)
+            cache_key_version=self.corpus.get('cache_key_version','paper2-real-cache-key-v1'),sleep_seconds=sleep_seconds)
 
     def wrap_writer(self,writer):return EventWriter(writer,self)
 
@@ -169,9 +171,11 @@ class LegacyRealtimeModel(Model):
                               start_t=(begin-self.epoch)/1e9,end_t=(end-self.epoch)/1e9))
         self.span_id=""
 
+    def worker_publics(self):
+        return {bytes.fromhex(e["public_key_hex"]) for group in ("transactions","blocks") for e in self.corpus[group].values()}
+
     def run(self):
-        publics={bytes.fromhex(e["public_key_hex"]) for group in ("transactions","blocks")
-                 for e in self.corpus[group].values()}
+        publics=self.worker_publics()
         if self.progress:self.progress.phase("prototype_window_start", event_rows=self.row_count)
         self.workers=Workers(self.pool.k,self.corpus["backend"],list(publics),self.sleep_seconds)
         if self.progress:self.progress.phase("workers_ready", workers=self.pool.k)
@@ -605,7 +609,65 @@ class CompletionFirstModel(PreDeviation5Model):
             **self.validity.report((self.finish_ns-self.epoch)/1e9,final=True))
 
 
-RealtimeModel=CompletionFirstModel
+class CycleRealtimeModel(PreDeviation5Model):
+    """Deviation 4 dispatch order; optional diagnostics never slice/reorder work."""
+    def __init__(self,*args,**kwargs):
+        self.pause_monitor=None
+        super().__init__(*args,**kwargs)
+        self.detailed=self.config.get('diagnostic_instrumentation',False)
+        if self.detailed:
+            from types import MethodType
+            labels=dict(_view='policy_view',_dispatch='select_dispatch',_admit_state='admission_state',
+                _insert_cache='cache_insert_evidence',_decide_block='block_state',_lookup='cache_lookup_ttl',
+                _admit_ready='admission_structural',_block_ready='block_structural',_new_job='job_preparation',
+                _start='send_start',_receive='receive_result')
+            for method,label in labels.items():
+                base=getattr(self,method).__func__
+                setattr(self,method,MethodType(labelled(label)(base),self))
+
+    def _handle(self,callback,*args):
+        if not self.detailed:return super()._handle(callback,*args)
+        self.span_id=len(self.spans);begin=time.monotonic_ns();self.marker_ns=begin
+        if self.pause_monitor:self.pause_monitor.begin_span(self.span_id,callback.__name__,begin)
+        self._log('dispatcher_busy_start')
+        try:callback(*args)
+        finally:
+            end=time.monotonic_ns();self.marker_ns=end
+            if self.pause_monitor:self.pause_monitor.end_span(end)
+            self._log('dispatcher_busy_end')
+            self.spans.append(dict(id=self.span_id,start_ns=begin,end_ns=end,start_t=(begin-self.epoch)/1e9,
+                end_t=(end-self.epoch)/1e9,kind=callback.__name__))
+            self.span_id=''
+
+    def run(self):
+        owned=self.pause_monitor is None
+        if owned:
+            directory=self.config.get('output_dir') or Path(self.event_writer.writer.stream.name).parent
+            self.pause_monitor=PauseRecorder(directory,detailed=self.detailed);self.pause_monitor.register()
+        complete=False
+        try:
+            super().run();complete=True
+            if self.progress and self.config.get('g3_input_version')==6:
+                from .cycle_validity import from_records
+                waiting={}
+                for i in range(self.event_writer.count):
+                    row=self.event_writer.records[i]
+                    if row[2]=='end':waiting[row[6][0]]=row[3]+row[4]>0
+                self.progress.phase('cycle_stationarity',prototype_validity=from_records(
+                    [vars(j) for j in self.jobs.values()],waiting,self.config,self.blocks))
+        finally:
+            if owned:self.pause_monitor.finish(partial=not complete)
+
+    def extra_manifest(self,directory):
+        value=super().extra_manifest(directory)
+        value['prototype'].update(dispatch_path='Deviation 4 (no completion-first/slicing)',
+            validity_scheme='cycle-calibration-v6',cache_key_version='paper2-cache-key-v2',
+            pause_attribution=dict(gc='gc_pauses.json',detailed=self.detailed,gc_controls_changed=False,
+                **({'long_spans':'long_spans.json'} if self.detailed else {})))
+        return value
+
+
+RealtimeModel=CycleRealtimeModel
 
 
 def run(config,corpus_path,*,sleep_seconds=0,stop_t=None,validated_sha256=None):
@@ -616,7 +678,7 @@ def run(config,corpus_path,*,sleep_seconds=0,stop_t=None,validated_sha256=None):
         model.pause_monitor=monitor;holder.append(model);return model
     try:
         if config.get("output_dir"):
-            monitor=PauseRecorder(config["output_dir"]);monitor.register()
+            monitor=PauseRecorder(config["output_dir"],detailed=config.get('diagnostic_instrumentation',False));monitor.register()
         e,m=run_model(config,model_type=create)
         if monitor:
             monitor.finish()

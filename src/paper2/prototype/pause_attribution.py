@@ -69,12 +69,13 @@ def labelled(name):
 
 
 class PauseRecorder:
-    def __init__(self,directory,*,gc_capacity=131072,span_capacity=1048576,step_capacity=8388608):
+    def __init__(self,directory,*,gc_capacity=131072,span_capacity=1048576,step_capacity=8388608,detailed=True):
         from src.paper2.model.service_times import ROOT
         self.directory=Path(directory).resolve()
         if self.directory==ROOT or ROOT in self.directory.parents:raise ValueError("pause buffers must be outside checkout")
         self.directory.mkdir(parents=True,exist_ok=True)
-        capacities=(gc_capacity,span_capacity,step_capacity)
+        self.detailed=detailed
+        capacities=(gc_capacity,span_capacity if detailed else 1,step_capacity if detailed else 1)
         if any(isinstance(c,bool) or not isinstance(c,int) or c<1 for c in capacities):raise ValueError("positive pause capacities required")
         self.buffers=[]
         try:
@@ -83,6 +84,7 @@ class PauseRecorder:
             for b in self.buffers:b.close()
             raise
         self.gc,self.spans,self.steps=self.buffers
+        struct.pack_into('<Q',self.gc.memory,48,int(detailed))
         self.active_gc=None;self.active_span=None;self.current_span=-1
         self.current_step=CODES["preparation"];self.registered=False;self.closed=False
         self._callback=self.callback
@@ -113,17 +115,19 @@ class PauseRecorder:
 
     def step(self,code,now=None):
         previous=self.current_step
-        if self.closed:return previous
+        if self.closed or not self.detailed:return previous
         self.current_step=code
         self.steps.append(time.monotonic_ns() if now is None else now,self.current_span+1,code)
         return previous
 
     def begin_span(self,identity,kind,now):
+        if not self.detailed:return
         code=KINDS.index(kind) if kind in KINDS else 0
         self.current_span=identity;self.active_span=self.spans.append(identity,now,0,code,0)
         self.step(CODES["handler:"+kind] if kind in KINDS[1:] else CODES["handler:other"],now)
 
     def end_span(self,now):
+        if not self.detailed:return
         if self.active_span is not None:
             offset=HEADER+self.active_span*self.spans.fmt.size
             struct.pack_into("<Q",self.spans.memory,offset+16,now)
@@ -170,6 +174,9 @@ def recover(directory,*,partial=True,write_missing=False):
         # if the process later times out in cleanup.
         try:
             gdoc=json.loads((directory/"gc_pauses.json").read_bytes())
+            if (gdoc.get('schema')=='paper2-pause-attribution-v1' and gdoc.get('detailed') is False and
+                    isinstance(gdoc.get('records'),list) and not gdoc.get('error')):
+                return dict(partial=gdoc['partial'],overflow=gdoc['overflow'],gc_records=len(gdoc['records']),long_spans=0,open_spans=0,error=None)
             ldoc=json.loads((directory/"long_spans.json").read_bytes())
             if (gdoc.get("schema")=="paper2-pause-attribution-v1" and
                     ldoc.get("schema")=="paper2-pause-attribution-v1" and
@@ -222,7 +229,8 @@ def recover(directory,*,partial=True,write_missing=False):
         common=dict(schema="paper2-pause-attribution-v1",partial=partial,overflow=go or so or to,
             capture_start_ns=started,capture_stop_ns=stopped or None,
             semantics="elapsed overlap only; labelled steps do not establish CPU/OS cause")
-        gdoc=dict(common,records=pauses)
+        detailed=bool(struct.unpack_from('<Q',gm,48)[0])
+        gdoc=dict(common,records=pauses,detailed=detailed)
         ldoc=dict(common,span_records=sn,step_records=tn,
             spans=[r for r in longs.values() if r["complete"]],open_spans=incomplete,outside_steps=outside)
     except (ValueError,OSError,struct.error) as exc:
@@ -232,7 +240,8 @@ def recover(directory,*,partial=True,write_missing=False):
         gdoc=dict(common,records=[]);ldoc=dict(common,spans=[],open_spans=[],outside_steps=[])
     finally:
         for file,memory,_,_ in opened:memory.close();file.close()
-    write_json(directory/"gc_pauses.json",gdoc);write_json(directory/"long_spans.json",ldoc)
+    write_json(directory/"gc_pauses.json",gdoc)
+    if gdoc.get('detailed',True):write_json(directory/"long_spans.json",ldoc)
     return dict(partial=gdoc["partial"],overflow=gdoc["overflow"],gc_records=len(gdoc["records"]),
         long_spans=len(ldoc["spans"]),open_spans=len(ldoc["open_spans"]),error=gdoc.get("error"))
 

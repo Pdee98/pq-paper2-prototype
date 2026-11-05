@@ -95,7 +95,7 @@ class Deviation4(unittest.TestCase):
     def test_public_corpus_audit_hashes_size_and_immutable_leaf_identifier(self):
         with tempfile.TemporaryDirectory() as td:
             root=Path(td);doc=corpus.build(self.fixture(),"sleep")
-            path=root/"public-corpus.zip";record=public_corpus.write_archive(doc,path)
+            path=root/"public-corpus.zip";record=public_corpus.write_archive(doc,path,compact=False)
             self.assertEqual(public_corpus.validate_archive(path,record),record)
             with zipfile.ZipFile(path) as z:
                 public=json.loads(z.read("corpus.json"))
@@ -134,7 +134,7 @@ class Deviation4(unittest.TestCase):
         self.assertIsNone(runner.ENGINEERING_CAPS)
         self.assertEqual(runner.arm_remaining_projection(20,3,dict(preparation=4,serialisation=6)),800)
         with patch.object(diagnostic,"generate_workload",return_value=dict(transactions={i:None for i in range(99943)},blocks=[None]*784)):
-            p=diagnostic.projection()
+            p=diagnostic.projection_historical()
         self.assertEqual((p["messages"],p["signing_keys"],p["size_probe_keys"]),(100727,198,1))
         self.assertAlmostEqual(p["presigning_seconds"],227.9214610537322)
         self.assertIn("UNVERIFIED",p["caveat"])
@@ -194,7 +194,7 @@ class Deviation4(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,"checkout differs"):
                     diagnostic.verify_checkout(index)
             report=diagnostic.analyse(inputs,root/"analysis","123")
-            self.assertEqual(report["purpose"],"DIAGNOSTIC v2")
+            self.assertEqual(report["purpose"],diagnostic.PURPOSE)
             self.assertEqual(report["prototype_violations"],[])
             self.assertNotIn("status",report)
             self.assertFalse((root/"analysis/G3_STATUS.json").exists())

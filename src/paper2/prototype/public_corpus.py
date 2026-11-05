@@ -26,12 +26,15 @@ def audit(value):
         for item in value: audit(item)
     elif isinstance(value, str) and ("PRIVATE" + " KEY") in value.upper():
         raise ValueError("private material in public corpus")
+    elif isinstance(value,bytes) and (b"PRIVATE"+b" KEY") in value.upper():
+        raise ValueError("private material in public corpus")
 
 
 def document(corpus):
     # Workload RNG provenance and presigning ledgers are not needed by the checker.
     result = {k: corpus[k] for k in ("version", "backend", "context", "transactions", "blocks", "block_objects")}
     result["workload"] = {k: corpus["workload"][k] for k in ("transactions", "blocks")}
+    result["cache_key_version"]=corpus.get("cache_key_version","paper2-real-cache-key-v1")
     audit(result)
     return result
 
@@ -41,22 +44,31 @@ def validate_archive(path, expected=None):
     if expected is not None and digest(path.read_bytes()) != expected["sha256"]:
         raise ValueError("public corpus archive SHA-256 mismatch")
     with zipfile.ZipFile(path) as archive:
-        if archive.namelist() != ["corpus.json"]:
+        if archive.namelist() not in (["corpus.json"],["corpus.bin"]):
             raise ValueError("excluded file or unexpected public corpus inventory")
-        info = archive.getinfo("corpus.json")
+        name=archive.namelist()[0];info = archive.getinfo(name)
         if info.file_size > LIMIT: raise ValueError("public corpus exceeds 2 GB")
-        raw = archive.read("corpus.json")
-    audit(json.loads(raw))
-    entry = dict(path="corpus.json", sha256=digest(raw), bytes=len(raw))
+        raw = archive.read(name)
+    from .compact import unpack
+    doc=unpack(raw) if name=='corpus.bin' else json.loads(raw);audit(doc)
+    if doc.get("version")=="paper2-compact-public-corpus-v2":
+        from .compact import expand
+        expand(doc)
+    entry = dict(path=name, sha256=digest(raw), bytes=len(raw))
     if expected is not None and expected["files"] != [entry]:
         raise ValueError("public corpus file SHA-256 mismatch")
     return dict(sha256=digest(path.read_bytes()), compressed_bytes=path.stat().st_size,
                 uncompressed_bytes=len(raw), files=[entry])
 
 
-def write_archive(corpus, destination, existing=()):
+def write_archive(corpus, destination, existing=(),full_path=None,compact=True):
     destination = Path(destination)
-    raw = json.dumps(document(corpus), ensure_ascii=True, sort_keys=True,
+    if compact:
+        from .compact import audit_full,document as compact_document
+        value=compact_document(corpus,audit_full(corpus,full_path));audit(value)
+    else:value=document(corpus)
+    from .compact import pack
+    raw = pack(value) if compact else json.dumps(value, ensure_ascii=True, sort_keys=True,
                      separators=(",", ":"), allow_nan=False).encode() + b"\n"
     if len(raw) + sum(r["uncompressed_bytes"] for r in existing) > LIMIT:
         raise ValueError("STOP: total public corpus exceeds 2 GB uncompressed")
@@ -65,7 +77,7 @@ def write_archive(corpus, destination, existing=()):
     with tempfile.TemporaryDirectory(prefix="paper2-public-corpus-") as td:
         temp = Path(td) / "public-corpus.zip"
         with zipfile.ZipFile(temp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
-            info = zipfile.ZipInfo("corpus.json", (1980, 1, 1, 0, 0, 0))
+            info = zipfile.ZipInfo("corpus.bin" if compact else "corpus.json", (1980, 1, 1, 0, 0, 0))
             info.create_system = 3; info.external_attr = 0o100644 << 16
             archive.writestr(info, raw, compress_type=zipfile.ZIP_DEFLATED, compresslevel=6)
         record = validate_archive(temp)
@@ -101,10 +113,16 @@ def checker_manifest(packet, output):
     packet, output = Path(packet), Path(output)
     info = json.loads((packet / "info.json").read_text())
     archive = packet / "prototype/public-corpus.zip"
+    if info.get('public_corpus_ref'):
+        from .replay import safe_file
+        archive=safe_file(packet.parent,info['public_corpus_ref'])
     validate_archive(archive, info["public_corpus"])
     output.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(archive) as source:
-        raw = source.read("corpus.json")
+        name=source.namelist()[0];raw = source.read(name)
+        if name=='corpus.bin':
+            from .compact import unpack,expand
+            raw=json.dumps(expand(unpack(raw)),separators=(",",":")).encode()+b'\n'
     corpus = output / "corpus.json"; corpus.write_bytes(raw)
     manifest = json.loads((packet / "prototype/manifest.json").read_text())
     import os

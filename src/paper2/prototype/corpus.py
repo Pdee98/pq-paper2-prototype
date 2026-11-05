@@ -27,12 +27,30 @@ def digest(value):
     return hashlib.sha256(canonical(value)).hexdigest()
 
 
-def cache_key(context, public_key, payload, nonce, signature):
+def cache_key_v1(context, public_key, payload, nonce, signature):
     if isinstance(nonce, bool) or not isinstance(nonce, int) or nonce < 0 or nonce >= 2**64:
         raise ValueError("nonce must fit uint64")
     parts = [b"paper2-real-cache-key-v1"] + [context[k].encode() for k in CONTEXT]
     parts += [bytes(public_key), bytes(payload), nonce.to_bytes(8, "big"), bytes(signature)]
     return hashlib.sha256(b"".join(len(p).to_bytes(8, "big")+p for p in parts)).hexdigest()
+
+
+KEY_VERSION="paper2-cache-key-v2"
+
+
+def cache_key_v2(context,public_key_id,payload,nonce,signature_id):
+    if isinstance(nonce,bool) or not isinstance(nonce,int) or not 0<=nonce<2**64:
+        raise ValueError("nonce must fit uint64")
+    for value in (public_key_id,signature_id):
+        if not isinstance(value,str) or len(value)!=64 or any(c not in "0123456789abcdef" for c in value):
+            raise ValueError("canonical SHA-256 identifier required")
+    return digest([KEY_VERSION]+[context[k] for k in CONTEXT]+[public_key_id,
+        dict(payload_hex=bytes(payload).hex(),nonce=nonce),signature_id])
+
+
+def cache_key(context,public_key,payload,nonce,signature):
+    return cache_key_v2(context,hashlib.sha256(public_key).hexdigest(),payload,nonce,
+                        hashlib.sha256(signature).hexdigest())
 
 
 def commitment(tx, context):
@@ -60,15 +78,16 @@ def validate_entry(entry, context, tx=None):
             raise ValueError("signed payload differs from frozen Transaction")
         if len(frozen_tx(tx, signature).serialize()) != tx["size_bytes"]:
             raise ValueError("declared size differs from frozen wire representation")
-        if cache_key(context, public, payload, tx["nonce"], signature) != entry["cache_key"]:
+        function=cache_key if entry.get("key_version")==KEY_VERSION else cache_key_v1
+        if function(context, public, payload, tx["nonce"], signature) != entry["cache_key"]:
             raise ValueError("real cache key mismatch")
     return payload, signature, public
 
 
 def _sign_batch(task):
-    backend, batch_id, messages = task
+    backend, batch_id, messages, factory = task
     key_begin=time.perf_counter_ns()
-    signer = Signer(backend)
+    signer = (factory or Signer)(backend)
     keygen_ns=time.perf_counter_ns()-key_begin
     start = time.perf_counter_ns()
     try:
@@ -86,10 +105,10 @@ def _sign_batch(task):
         signer.close()
 
 
-def sign_messages(backend, messages, processes=1):
+def sign_messages(backend, messages, processes=1,signer_factory=None):
     if processes < 1:
         raise ValueError("positive presigning process count required")
-    batches = [(backend, i//512, messages[i:i+512]) for i in range(0,len(messages),512)]
+    batches = [(backend, i//512, messages[i:i+512],signer_factory) for i in range(0,len(messages),512)]
     # Every batch creates a distinct key. No secret key crosses a process boundary.
     start=time.perf_counter_ns()
     if processes == 1:
@@ -104,7 +123,7 @@ def sign_messages(backend, messages, processes=1):
         count=len(messages),processes=processes,leaf_rule="one key/batch; indices 0..count-1; max 512 per H10 key")
 
 
-def build(workload, backend="ed25519", processes=1, master=None, primitive_checks=False):
+def build(workload, backend="ed25519", processes=1, master=None, primitive_checks=False,signer_factory=None):
     """Build a public corpus. Optional master reuses signed transaction prefixes."""
     import copy
     w=copy.deepcopy(workload)
@@ -113,7 +132,7 @@ def build(workload, backend="ed25519", processes=1, master=None, primitive_check
     accounts=sorted({t["sender"] for t in w["transactions"].values()})
     sender_ids={name:int.from_bytes(hashlib.sha256(name.encode()).digest()[:4],"big") for name in accounts}
     if len(set(sender_ids.values()))!=len(sender_ids):raise ValueError("sender identity hash collision")
-    probe=Signer(backend)
+    probe=(signer_factory or Signer)(backend)
     signature_size=probe.signature_size
     probe.close()
     messages=[]
@@ -126,15 +145,17 @@ def build(workload, backend="ed25519", processes=1, master=None, primitive_check
         tx=normalize_tx(tx,context);w["transactions"][identity]=tx
         if master is None or identity not in master["transactions"]:
             messages.append((identity,frozen_tx(tx).signed_payload().hex(),tx["sig_label"]))
-    signed,tx_ledger=sign_messages(backend,messages,processes)
+    signed,tx_ledger=sign_messages(backend,messages,processes,signer_factory)
     entries={e.pop("identity"):e for e in signed}
     for identity,tx in w["transactions"].items():
         if identity not in entries:
             entries[identity]=copy.deepcopy(master["transactions"][identity])
         entry=entries[identity]
+        entry["key_version"]=KEY_VERSION
         entry["cache_key"]=cache_key(context,bytes.fromhex(entry["public_key_hex"]),
             bytes.fromhex(entry["payload_hex"]),tx["nonce"],bytes.fromhex(entry["signature_hex"]))
         tx.update(public_key_id=entry["key_id"],signature_id=hashlib.sha256(bytes.fromhex(entry["signature_hex"])).hexdigest())
+        entry["wire_leaf_hash"]=hashlib.sha256(b"PQ_BLOCKCHAIN_SIM_TX_MERKLE_V1"+frozen_tx(tx,bytes.fromhex(entry["signature_hex"])).serialize()).hexdigest()
     # Admission dictionaries may carry their own copies of metadata in generated workloads.
     for a in w["admissions"]:
         arrival=a["arrival_t"];a.update(w["transactions"][a["tx_id"]]);a["arrival_t"]=arrival
@@ -144,12 +165,13 @@ def build(workload, backend="ed25519", processes=1, master=None, primitive_check
         obj=Block(i,[frozen_tx(w["transactions"][name],bytes.fromhex(entries[name]["signature_hex"]))
                      for name in b["tx_ids"]],previous,proposer_id=1000000,timestamp=arrival)
         previous=obj.hash;objects[b["block_id"]]=dict(index=i,previous_hash=obj.previous_hash,
-            proposer_id=obj.proposer_id,timestamp=obj.timestamp,nonce=obj.nonce,hash=obj.hash)
+            proposer_id=obj.proposer_id,timestamp=obj.timestamp,nonce=obj.nonce,hash=obj.hash,merkle_root=obj.merkle_root)
         block_messages.append((b["block_id"],obj.get_signable_message().encode().hex(),b.get("block_sig_label","valid")))
-    signed,block_ledger=sign_messages(backend,block_messages,processes)
+    signed,block_ledger=sign_messages(backend,block_messages,processes,signer_factory)
     for e in signed:blocks[e.pop("identity")]=e
     result=dict(version="paper2-public-corpus-v1",backend=backend,context=context,workload=w,
         transactions=entries,blocks=blocks,block_objects=objects,
+        cache_key_version=KEY_VERSION,
         presigning=dict(transactions=tx_ledger,blocks=block_ledger))
     validate(result,primitive_checks=primitive_checks)
     return result
