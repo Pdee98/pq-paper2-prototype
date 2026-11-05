@@ -16,7 +16,7 @@ class CycleProtocol(unittest.TestCase):
     def test_calibration_replaces_at_most_once_and_retains_both_windows(self):
         with tempfile.TemporaryDirectory() as td:
             root=Path(td);calls=[]
-            def fresh(function,args,timeout):
+            def fresh(function,args,timeout,**kwargs):
                 path,k,directory,rep=args[:4];directory=Path(directory);directory.mkdir(parents=True)
                 cycle=function is cycle_calibration.calibrate_cycle
                 iteration=1 if '-i1-' in directory.name else 0

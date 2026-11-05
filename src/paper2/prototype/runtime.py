@@ -177,7 +177,14 @@ class LegacyRealtimeModel(Model):
     def run(self):
         publics=self.worker_publics()
         if self.progress:self.progress.phase("prototype_window_start", event_rows=self.row_count)
-        self.workers=Workers(self.pool.k,self.corpus["backend"],list(publics),self.sleep_seconds)
+        control=getattr(self,'gc_window',None)
+        worker_args=() if control is None else (60,str(control.directory))
+        self.workers=Workers(self.pool.k,self.corpus["backend"],list(publics),self.sleep_seconds,*worker_args)
+        sampler=None
+        if control:
+            from .gc_control import MemorySampler
+            sampler=MemorySampler(self.progress,control.directory,[p.pid for p in getattr(self.workers,'processes',[])])
+            control.enter()
         if self.progress:self.progress.phase("workers_ready", workers=self.pool.k)
         self.epoch=time.monotonic_ns()
         if self.progress:self.progress.phase("epoch", epoch_ns=self.epoch)
@@ -185,6 +192,7 @@ class LegacyRealtimeModel(Model):
         self.scheduled_t=0
         try:
             while self.events or self.pool.running:
+                if sampler:sampler.sample()
                 now=(time.monotonic_ns()-self.epoch)/1e9
                 if self.progress:
                     self.progress.advance(min(now,self.stop_t) if self.stop_t is not None else now)
@@ -214,8 +222,10 @@ class LegacyRealtimeModel(Model):
                 raise RuntimeError("unfinished worker jobs")
             if self.progress:self.progress.phase("drain_end", drain_complete=not self.incomplete,
                 q_admission=self.pool.counts()[0],q_block=self.pool.counts()[1],running=len(self.pool.running),event_rows=self.row_count)
+            if control:control.leave(partial=self.incomplete)
             if not self.incomplete:self.workers.handshake("after")
         finally:
+            if control:control.leave(partial=True)
             self.workers.close()
 
     def extra_manifest(self,directory):
@@ -641,9 +651,13 @@ class CycleRealtimeModel(PreDeviation5Model):
 
     def run(self):
         owned=self.pause_monitor is None
+        directory=self.config.get('output_dir') or Path(self.event_writer.writer.stream.name).parent
         if owned:
-            directory=self.config.get('output_dir') or Path(self.event_writer.writer.stream.name).parent
-            self.pause_monitor=PauseRecorder(directory,detailed=self.detailed);self.pause_monitor.register()
+            self.pause_monitor=PauseRecorder(directory,detailed=self.detailed)
+        from .gc_control import WindowGC
+        self.gc_window=WindowGC(directory,self.pause_monitor)
+        own_progress=self.progress is None
+        if own_progress:self.progress=Progress(directory)
         complete=False
         try:
             super().run();complete=True
@@ -656,13 +670,27 @@ class CycleRealtimeModel(PreDeviation5Model):
                 self.progress.phase('cycle_stationarity',prototype_validity=from_records(
                     [vars(j) for j in self.jobs.values()],waiting,self.config,self.blocks))
         finally:
+            self.gc_window.leave(partial=not complete)
             if owned:self.pause_monitor.finish(partial=not complete)
+            if not complete:
+                # A memory stop must retain completed buffer records and job
+                # state, even though run_model cannot write a normal manifest.
+                writer=self.event_writer
+                if writer is not None and getattr(writer,'writer',None) is not None:
+                    writer.flush()
+                    if hasattr(writer.writer,'flush'):writer.writer.flush()
+                write_json(Path(directory)/'partial-jobs.json',[vars(j) for j in self.jobs.values()])
+                write_json(Path(directory)/'partial-state.json',dict(status='INVALID',
+                    event_rows=self.row_count,q_admission=self.pool.counts()[0],q_block=self.pool.counts()[1],
+                    running=len(self.pool.running)))
+            if own_progress:self.progress.close()
 
     def extra_manifest(self,directory):
         value=super().extra_manifest(directory)
         value['prototype'].update(dispatch_path='Deviation 4 (no completion-first/slicing)',
             validity_scheme='cycle-calibration-v6',cache_key_version='paper2-cache-key-v2',
-            pause_attribution=dict(gc='gc_pauses.json',detailed=self.detailed,gc_controls_changed=False,
+            gc_control=dict(version=7,state='gc_state.json',memory_guard='12 GiB per process / 2 GiB available'),
+            pause_attribution=dict(gc='gc_pauses.json',detailed=self.detailed,gc_controls_changed=True,
                 **({'long_spans':'long_spans.json'} if self.detailed else {})))
         return value
 
@@ -678,7 +706,7 @@ def run(config,corpus_path,*,sleep_seconds=0,stop_t=None,validated_sha256=None):
         model.pause_monitor=monitor;holder.append(model);return model
     try:
         if config.get("output_dir"):
-            monitor=PauseRecorder(config["output_dir"],detailed=config.get('diagnostic_instrumentation',False));monitor.register()
+            monitor=PauseRecorder(config["output_dir"],detailed=config.get('diagnostic_instrumentation',False))
         e,m=run_model(config,model_type=create)
         if monitor:
             monitor.finish()

@@ -69,8 +69,9 @@ def execute(root):
                     proto=runner.fresh(runner.prototype_run,(cfg,cp,replay.sha256_file(cp)),runner.remaining(root),progress_path=Path(cfg['output_dir'])/'progress.jsonl',
                         phase_timeouts=dict(runner.ENGINEERING_CAPS,**{'prototype window':110}),partial_dir=root/'timeouts'/rid)
                     row=next(r for r in index['runs'] if r['run_id']==rid)
-                    row['manifest_sha256']=replay.create_packet(inputs/rid,cfg,cp,proto,refs[c['backend']][c['k']]['cycle_samples'],c,rep,
-                        shared_public='shared-corpora/'+name+'/public-corpus.zip')
+                    reference=refs[c['backend']][c['k']]
+                    row['manifest_sha256']=replay.create_packet(inputs/rid,cfg,cp,proto,reference['held_out_cycle_samples'],c,rep,
+                        shared_public='shared-corpora/'+name+'/public-corpus.zip',primary=reference['primary_cycle_samples'])
                     replay.write_index(inputs,index)
                     state.setdefault('arm_corpus_audits',{})[rid]=replay.read(inputs/rid/'info.json')['arm_corpus_audit']
                     state['prototypes'].append(dict(run_id=rid,cell=c,replicate=rep,prototype=proto));state['public_corpus']=public_corpus.audit_upload(inputs)

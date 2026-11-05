@@ -23,8 +23,8 @@ from .calibration import calibrate_once
 from .progress import read_progress, phase_times
 from .pause_attribution import summarise as summarise_pauses, estimate_overhead
 
-RUN_ID="paper2-g3-diag-v3"
-PURPOSE="DIAGNOSTIC v3"
+RUN_ID="paper2-g3-diag-v4"
+PURPOSE="DIAGNOSTIC v4"
 CELL0=dict(backend="xmss",k=1,policy="fifo",rho=.5,rate=1115.433019832252,
            period=.11475364071546823,B_ref=2230.866039664504,B_cold=1119.102530780535)
 # Diagnostic watchdogs only. Production preparation/serialisation caps remain unset.
@@ -156,24 +156,31 @@ def collect_historical(root):
 
 
 def projection():
-    from .cycle_diagnostic import projection as v3_projection
-    return v3_projection()
+    from .cycle_diagnostic_v4 import projection as v4_projection
+    return v4_projection()
 
 
 def collect(root):
-    from .cycle_diagnostic import collect as v3_collect
-    return v3_collect(root)
+    from .cycle_diagnostic_v4 import collect as v4_collect
+    return v4_collect(root)
 
 
-def verify(root,source_run_id):
+def verify(root,source_run_id,run_id=None):
     root=Path(root);path=root/"DIAGNOSTIC_INDEX.json";index=replay.read(path)
     if sha256_file(path)!=(root/"DIAGNOSTIC_INDEX.sha256").read_text().strip():raise ValueError("diagnostic index SHA-256 mismatch")
     if index["purpose"]!=PURPOSE or index["run_id"]!=RUN_ID or index["source_run_id"]!=str(source_run_id):
         raise ValueError("diagnostic provenance mismatch")
-    packet=root/RUN_ID
-    if sha256_file(packet/"REPLAY_MANIFEST.json")!=index["packet_sha256"]:raise ValueError("diagnostic packet SHA-256 mismatch")
-    replay.verify_files(packet,"REPLAY_MANIFEST.json");public_corpus.audit_upload(root)
-    return index,packet
+    runs=index.get('runs',[dict(run_id=RUN_ID,packet_sha256=index.get('packet_sha256'))])
+    seen=set();selected=None
+    for run in runs:
+        if run['run_id'] in seen:raise ValueError('duplicate diagnostic run')
+        seen.add(run['run_id']);packet=replay.safe_file(root,run['run_id'])
+        if sha256_file(packet/'REPLAY_MANIFEST.json')!=run['packet_sha256']:raise ValueError('diagnostic packet SHA-256 mismatch')
+        replay.verify_files(packet,'REPLAY_MANIFEST.json')
+        if selected is None or run['run_id']==run_id:selected=packet
+    if run_id is not None and run_id not in seen:raise ValueError('unknown diagnostic run')
+    public_corpus.audit_upload(root)
+    return index,selected
 
 
 def verify_checkout(index):
@@ -201,9 +208,10 @@ def may_prepare_validation(drain,calibration_utilisation,observed_busy,hit,first
             hit is not None and hit>=.9 and first_drop is None and not violations)
 
 
-def analyse(root,output,source_run_id):
+def analyse(root,output,source_run_id,run_id=None):
     """Post-processing only, on x86 replay. Never computes G3 agreement."""
-    index,packet=verify(root,source_run_id);verify_checkout(index);output=Path(output).resolve()
+    index,packet=verify(root,source_run_id,run_id);verify_checkout(index);output=Path(output).resolve()
+    if packet is None:raise ValueError('no eligible diagnostic run; inspect skips')
     if output==ROOT or ROOT in output.parents:raise ValueError("diagnostic analysis must be outside checkout")
     output.mkdir(parents=True,exist_ok=False)
     proto=replay.postprocess_prototype(packet,output/"prototype-check")
@@ -222,8 +230,9 @@ def analyse(root,output,source_run_id):
     with (packet/"prototype/events.csv").open(newline="") as stream:
         for r in csv.DictReader(stream):
             t=float(r["t"]);end=min(105,t)
-            if qa+qb>0 and busy<1 and end>previous:
-                idle+=end-previous;covered+=overlap(previous,end,spans)
+            k=meta['config']['k']
+            if qa+qb>0 and busy<k and end>previous:
+                idle+=(end-previous)*(k-busy);covered+=overlap(previous,end,spans)*(k-busy)
             while cursor<105 and cursor+1<=t:
                 seconds[cursor].update(q_admission=qa,q_block=qb);cursor+=1
             qa,qb,busy=int(r["q_admission"]),int(r["q_block"]),int(r["busy_workers"])
@@ -290,6 +299,7 @@ def analyse(root,output,source_run_id):
         pause_summary["callback_overhead"]=(estimate_overhead(replay.read(pause_files[0]),replay.read(callback_cost),
             p["epoch_ns"],p["finish_ns"],p["dispatcher_active_ns"]) if callback_cost.is_file() else dict(status="NOT RECORDED"))
     report=dict(purpose=PURPOSE,excluded_from_G3=True,source_run_id=str(source_run_id),drain_complete=drain,
+        run_id=packet.name,cell=cell,
         pause_attribution=pause_summary,
         prototype_validity=proto["validity"],
         prototype_violations=proto["violations"],phase_seconds=timing,occupancy_by_class=occupancy,
@@ -323,17 +333,24 @@ def main():
         collect(a.output)
     elif a.command=="prepare":
         index,_=verify(a.inputs,a.source_run_id)
-        matrix=json.dumps(dict(include=[dict(run_id=RUN_ID)]),separators=(",",":"))
+        matrix=json.dumps(dict(include=[dict(run_id=r['run_id']) for r in index.get('runs',[dict(run_id=RUN_ID)])]),separators=(",",":"))
         with open(os.environ["GITHUB_OUTPUT"],"a") as stream:
             stream.write("matrix="+matrix+"\ncode_commit="+index["code_commit"]+"\n")
-    elif a.command=="run":analyse(a.inputs,a.output,a.source_run_id)
+    elif a.command=="run":analyse(a.inputs,a.output,a.source_run_id,a.run_id)
     else:
         index,_=verify(a.inputs,a.source_run_id);verify_checkout(index)
         found=list(a.results.rglob("DIAGNOSTIC_REPORT.json"))
-        if len(found)!=1:raise ValueError("missing/duplicate diagnostic analysis")
-        replay.verify_files(found[0].parent,"RESULT_MANIFEST.json")
+        expected={r['run_id'] for r in index.get('runs',[dict(run_id=RUN_ID)])};reports=[]
+        for path in found:
+            replay.verify_files(path.parent,'RESULT_MANIFEST.json');reports.append(replay.read(path))
+        observed=[r.get('run_id',RUN_ID) for r in reports]
+        if len(observed)!=len(expected) or set(observed)!=expected:raise ValueError('missing/duplicate diagnostic analysis')
         import shutil
-        shutil.copytree(found[0].parent,a.output,dirs_exist_ok=False)
+        a.output.mkdir(parents=True,exist_ok=False)
+        for path,report in zip(found,reports):shutil.copytree(path.parent,a.output/report.get('run_id',RUN_ID))
+        runner.save(a.output/'DIAGNOSTIC_V4_SUMMARY.json',dict(purpose=PURPOSE,excluded_from_G3=True,
+            skipped_cells=index.get('skipped_cells',[]),cells=reports,
+            next_action='AUTHOR REVIEW' if reports and all(r['next_action'].startswith('AUTHOR REVIEW') for r in reports) else 'STOP: report to author'))
 
 
 if __name__=="__main__":main()

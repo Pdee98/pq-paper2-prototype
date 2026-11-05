@@ -80,13 +80,13 @@ class CalibrationModel(PreDeviation5Model):
         from src.paper2.model.engine import Model
         Model._start(self,job,worker)
 
-def calibrate_cycle(corpus_path,k,output,replicate,traffic_rate,throughput,warmup=2,measurement=10):
+def calibrate_cycle(corpus_path,k,output,replicate,traffic_rate,throughput,warmup=2,measurement=10,diagnostic=False,seed_tag=''):
     if traffic_rate<=0 or warmup<0 or measurement<=0:raise ValueError('positive cycle calibration rate/window required')
     output=Path(output);output.mkdir(parents=True,exist_ok=False);pilot=json.loads(Path(corpus_path).read_bytes());duration=warmup+measurement
     with tempfile.TemporaryDirectory(prefix='paper2-cycle-synthetic-') as td:
         rate=max(256/duration,throughput)
-        backlog=traffic_workload(rate,duration,'paper2-cycle-backlog-'+pilot['backend']+str(k),'backlog:')
-        live=traffic_workload(traffic_rate,duration,'paper2-cycle-traffic-'+pilot['backend']+str(k),'traffic:')
+        backlog=traffic_workload(rate,duration,'paper2-cycle-backlog-'+pilot['backend']+str(k)+seed_tag,'backlog:')
+        live=traffic_workload(traffic_rate,duration,'paper2-cycle-traffic-'+pilot['backend']+str(k)+seed_tag,'traffic:')
         def times(w):return [w['block_start']+i*w['block_period'] for i in range(len(w['blocks']))]
         ordered=sorted(zip(times(backlog)+times(live),backlog['blocks']+live['blocks']),key=lambda pair:pair[0])
         w=dict(live,transactions={**backlog['transactions'],**live['transactions']},admissions=backlog['admissions']+live['admissions'],
@@ -96,7 +96,35 @@ def calibrate_cycle(corpus_path,k,output,replicate,traffic_rate,throughput,warmu
         cfg=dict(dummy['workload'],replicate=replicate,k=k,policy=dict(name='fifo'),coalesce_inflight=False,
             q_max=len(w['admissions'])+1,cache=dict(capacity=4096,ttl=2*128/traffic_rate,erase_on_inclusion=False),
             pool=dict(enabled=True,capacity_bytes=16*1024*1024))
-        model=CalibrationModel(cfg,path,pilot);model.stop_t=duration;model.run()
+        from .gc_control import WindowGC
+        from .pause_attribution import PauseRecorder, labelled
+        from .progress import Progress
+        from .runtime import CycleRealtimeModel
+        from types import MethodType
+        model=CalibrationModel(cfg,path,pilot);model.stop_t=duration
+        model.pause_monitor=PauseRecorder(output,detailed=diagnostic);model.detailed=diagnostic
+        model.gc_window=WindowGC(output,model.pause_monitor);model.progress=Progress(output)
+        if diagnostic:
+            model._handle=MethodType(CycleRealtimeModel._handle,model)
+            for name,label in dict(_decide_block='block_state',_receive='receive_result',_dispatch='select_dispatch',
+                                   _view='policy_view',_start='send_start',_admit_state='admission_state',
+                                   _insert_cache='cache_insert_evidence',_lookup='cache_lookup_ttl',
+                                   _admit_ready='admission_structural',_block_ready='block_structural',_new_job='job_preparation').items():
+                setattr(model,name,MethodType(labelled(label)(getattr(model,name).__func__),model))
+        complete=False
+        try:model.run();complete=True
+        finally:
+            model.gc_window.leave(partial=not complete)
+            model.pause_monitor.finish(partial=not complete);model.progress.close()
+        if diagnostic:
+            from .serialisation import write_json
+            with (output/'events.csv').open('x',newline='') as stream:
+                writer=csv.writer(stream);writer.writerow(model.event_fields)
+                for i in range(model.event_writer.count):writer.writerow(model.serialize_event(model.event_writer.records[i]))
+            with (output/'jobs.csv').open('x',newline='') as stream:
+                writer=csv.writer(stream);writer.writerow(('job_id','record'))
+                for j in model.jobs.values():writer.writerow((j.job_id,json.dumps(vars(j),separators=(',',':'))))
+            write_json(output/'dispatcher_spans.json',model.spans)
         selected=[r for r in model.samples if warmup*1e9<=r['send_ns']<(warmup+measurement)*1e9]
         if model.unbacklogged:raise ValueError('cycle calibration source was not backlogged')
         if any(not any(r['job_class']==c for r in selected) for c in CLASSES):raise ValueError('missing cycle calibration class')
@@ -106,6 +134,8 @@ def calibrate_cycle(corpus_path,k,output,replicate,traffic_rate,throughput,warmu
         for c in CLASSES:
             values=sorted(r['duration_ns']/1e9 for r in selected if r['job_class']==c);stats[c]['p99']=values[math.ceil(.99*len(values))-1]
         result=dict(backend=pilot['backend'],k=k,replicate=replicate,traffic_rate=traffic_rate,warmup=warmup,measurement=measurement,
+            epoch_ns=model.epoch,seed_tag=seed_tag,diagnostic_instrumentation=diagnostic,
+            gc_control=dict(version=7,state='gc_state.json',progress='progress.jsonl'),
             means={c:stats[c]['mean'] for c in CLASSES},statistics=stats,samples=str(output/'cycles.csv'),
             synthetic_live_arrivals=len(live['admissions']),synthetic_live_blocks=len(live['blocks']),initial_backlog_jobs=model.sent+len(model.pool.waiting),
             physical_sends=model.sent,unbacklogged_successors=model.unbacklogged,unfinished_at_boundary=len(model.pool.running),
@@ -114,7 +144,7 @@ def calibrate_cycle(corpus_path,k,output,replicate,traffic_rate,throughput,warmu
     (output/'calibration.json').write_text(json.dumps(result,indent=2));return result
 
 
-def calibrate_backend(backend,path,root,stage_times=None,timeout=1200):
+def calibrate_backend(backend,path,root,stage_times=None,timeout=1200,diagnostic=False,seed_tag=''):
     """Old diagnostics retained; exactly one representative-traffic replacement."""
     from . import runner
     from .calibration import calibrate_once
@@ -124,11 +154,12 @@ def calibrate_backend(backend,path,root,stage_times=None,timeout=1200):
     def invoke(function,args):
         budget=timeout-(time.perf_counter()-begin)
         if budget<=0:raise TimeoutError('cycle calibration stage watchdog')
-        at=time.perf_counter();r=runner.fresh(function,args,budget)
+        at=time.perf_counter();r=runner.fresh(function,args,budget,progress_path=Path(args[2])/'progress.jsonl',
+            partial_dir=root/'calibration-timeouts'/Path(args[2]).name)
         if stage_times is not None:runner.account(root,stage_times,'calibration',time.perf_counter()-at)
         return r
     for k in (1,2,3):
-        for rep in range(3):old.append(invoke(calibrate_once,(path,k,root/'calibration'/f'{backend}-k{k}-r{rep}',rep)))
+        for rep in range(3):old.append(invoke(calibrate_once,(path,k,root/'calibration'/f'{backend}-k{k}-r{rep}',rep,2,10,diagnostic)))
     throughput={k:statistics.fmean(r['throughput'] for r in old if r['k']==k) for k in (1,2,3)}
     occupancy={}
     for k in (1,2,3):
@@ -142,12 +173,15 @@ def calibrate_backend(backend,path,root,stage_times=None,timeout=1200):
         def window(iteration,rate):
             runner.save(root/'calibration'/f'{backend}-k{k}-cycle-i{iteration}-DESIGN.json',
                 dict(backend=backend,k=k,traffic_rate=rate,old_B_cold=prior[k]['B_cold'],iteration=iteration,
+                     seed_tag=seed_tag,diagnostic_instrumentation=diagnostic,
                      design='fixed before this window; FIFO backlog plus actual synthetic arrival/block handlers'))
-            result=[invoke(calibrate_cycle,(path,k,root/'calibration'/f'{backend}-k{k}-cycle-i{iteration}-r{rep}',rep,rate,throughput[k])) for rep in range(3)]
+            result=[invoke(calibrate_cycle,(path,k,root/'calibration'/f'{backend}-k{k}-cycle-i{iteration}-r{rep}',rep,rate,throughput[k],2,10,diagnostic,seed_tag)) for rep in range(3)]
             target=root/'calibration'/f'{backend}-k{k}-cycle-i{iteration}.csv';runner.merge_samples([r['samples'] for r in result],target)
             with target.open(newline='') as f:data=list(csv.DictReader(f))
             m={c:statistics.fmean(int(r['duration_ns'])/1e9 for r in data if r['job_class']==c) for c in CLASSES}
-            ref=cold_cycle_reference(k,m,d,throughput[k]/throughput[1]);ref.update(cycle_samples=str(target),occupancy_samples=str(occupancy[k]),calibration_traffic_rate=rate)
+            from .calibration_split import split_samples
+            slots=split_samples([r['samples'] for r in result],target.with_suffix(''))
+            ref=cold_cycle_reference(k,m,d,throughput[k]/throughput[1]);ref.update(cycle_samples=str(target),occupancy_samples=str(occupancy[k]),calibration_traffic_rate=rate,**slots)
             windows.append(dict(backend=backend,k=k,iteration=iteration,rate=rate,reference=ref,repetitions=result));return ref
         ref=window(0,rate)
         ratios=[max(r['rate']/rate,rate/r['rate']) for r in cold_cycle_loads(ref)]

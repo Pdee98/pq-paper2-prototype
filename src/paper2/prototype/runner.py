@@ -68,7 +68,21 @@ def fresh(function,args,timeout,progress_path=None,phase_timeouts=None,partial_d
     process=ctx.Process(target=_fresh_entry,args=(child,function,args));process.start();child.close()
     try:
         begin=time.monotonic()
+        memory_sampler=None
+        if progress_path:
+            from .gc_control import MemorySampler
+            directory=Path(progress_path).parent
+            memory_sampler=MemorySampler(None,directory,[process.pid])
         while not parent.poll(.1):
+            if memory_sampler and process.is_alive():
+                from .gc_control import MemoryStop
+                try:memory_sampler.sample()
+                except MemoryStop:
+                    process.terminate();process.join(5)
+                    from .pause_attribution import recover
+                    recover(Path(progress_path).parent,write_missing=True)
+                    if partial_dir:shutil.copytree(Path(progress_path).parent,partial_dir,dirs_exist_ok=True)
+                    raise
             rows=read_progress(progress_path) if progress_path else []
             phases=[r for r in rows if r["phase"]!="second"]
             last=phases[-1]["phase"] if phases else "process_start_pending"
@@ -316,6 +330,8 @@ def record_host(root):
     root=Path(root);root.mkdir(parents=True,exist_ok=True)
     record=dict(platform=platform.platform(),machine=platform.machine(),python=platform.python_version(),
                 affinity=sorted(os.sched_getaffinity(0)) if hasattr(os,"sched_getaffinity") else None)
+    from .gc_control import memory_snapshot
+    record['memory']=memory_snapshot()
     for name,args in (("lscpu",["lscpu"]),("nproc",["nproc"]),("kernel",["uname","-a"])):
         r=subprocess.run(args,capture_output=True,text=True);record[name]=dict(stdout=r.stdout,stderr=r.stderr,returncode=r.returncode)
     for name,file in (("cpuinfo","/proc/cpuinfo"),("governor","/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")):

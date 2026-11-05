@@ -133,7 +133,7 @@ def verify_index(root,source_run_id=None,complete=True):
     return index
 
 
-def create_packet(directory,config,corpus_path,prototype,held_out,cell,replicate,window=(30,90),shared_public=None):
+def create_packet(directory,config,corpus_path,prototype,held_out,cell,replicate,window=(30,90),shared_public=None,primary=None):
     """Copy public inputs/evidence only; check privacy before creating payloads."""
     directory=Path(directory);doc=read(corpus_path);meta=read(prototype["manifest"])
     if meta.get("prototype",{}).get("mode")!="real-time-v1" or meta["config"].get("prototype",{}).get("mode")!="real-time-v1":
@@ -156,22 +156,30 @@ def create_packet(directory,config,corpus_path,prototype,held_out,cell,replicate
         "prototype/manifest.json":Path(prototype["manifest"]),
         "prototype/dispatcher_spans.json":Path(prototype["manifest"]).parent/meta["prototype"]["spans"]["path"],
         "held-out.csv":Path(held_out)}
+    if primary is not None:
+        from .calibration_split import verify_slots
+        verify_slots(primary,held_out)
+        originals['primary.csv']=Path(primary)
+        info['calibration_slots']=dict(primary=[0,1],held_out=[2],rate_stationarity=[0,1,2])
     progress=Path(prototype["events"]).parent/"progress.jsonl"
     if progress.is_file():originals["prototype/progress.jsonl"]=progress
-    for name in ("gc_pauses.json","long_spans.json"):
+    for name in ("gc_pauses.json","long_spans.json","gc_state.json","memory-stop.json"):
         path=Path(prototype["events"]).parent/name
         if path.is_file():originals["prototype/"+name]=path
-        elif meta["prototype"].get("pause_attribution") and (name=='gc_pauses.json' or meta['prototype']['pause_attribution'].get('detailed',True)):
+        elif name in ('gc_pauses.json','long_spans.json') and meta["prototype"].get("pause_attribution") and (name=='gc_pauses.json' or meta['prototype']['pause_attribution'].get('detailed',True)):
             raise ValueError("missing pause attribution evidence: "+name)
     callback_cost=Path(prototype["events"]).parent/"callback_overhead.json"
     if callback_cost.is_file():originals["prototype/callback_overhead.json"]=callback_cost
+    for worker_path in sorted(Path(prototype['events']).parent.glob('worker-*/*.json')):
+        originals['prototype/'+worker_path.parent.name+'/'+worker_path.name]=worker_path
     for value in values.values():audit_value(value)
     for path in originals.values():audit_file(path)
-    with Path(held_out).open(newline="",encoding="utf-8") as stream:
-        for row in csv.DictReader(stream):
-            source=(f"concurrency-cycle-k{cell['k']}-rep" if cell.get('g3_input_version')==6 else f"concurrency-k{cell['k']}-rep")
-            if not row["backend"].startswith(doc["backend"]+":") or not row.get("source","").startswith(source):
-                raise ValueError("held-out calibration backend/k mismatch")
+    for sample in ([held_out,primary] if primary is not None else [held_out]):
+        with Path(sample).open(newline="",encoding="utf-8") as stream:
+            for row in csv.DictReader(stream):
+                source=(f"concurrency-cycle-k{cell['k']}-rep" if cell.get('g3_input_version')==6 else f"concurrency-k{cell['k']}-rep")
+                if not row["backend"].startswith(doc["backend"]+":") or not row.get("source","").startswith(source):
+                    raise ValueError("held-out calibration backend/k mismatch")
     if directory.exists():raise FileExistsError("replay packet already exists")
     directory.mkdir(parents=True)
     existing=public_corpus.inventory(directory.parent)["files"]
@@ -191,8 +199,9 @@ def create_packet(directory,config,corpus_path,prototype,held_out,cell,replicate
     for name,path in originals.items():
         target=directory/name;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(path,target)
     if cell.get('g3_input_version')==6:
-        shutil.copyfile(held_out,directory/'primary.csv')
-        info['service_input']='held-out representative-traffic calibration cycles (both legacy comparison slots)'
+        if primary is None:shutil.copyfile(held_out,directory/'primary.csv')
+        info['service_input']=('Deviation 7: fresh-process calibration reps 1-2 primary; rep 3 held-out; all three for rates/stationarity'
+                               if primary is not None else 'historical Deviation 6 identical comparison slots')
         save(directory/'info.json',info)
     else:samples_from_jobs(originals["prototype/jobs.csv"],directory/"primary.csv",doc["backend"],"validation")
     for path in directory.rglob("*"):
@@ -272,6 +281,24 @@ def postprocess_prototype(directory,output):
         from .cycle_validity import from_logs
         validity=from_logs(events,jobs,config,manifest,info['window'])
     else:validity=prototype_validity(events,config,info['window'])
+    memory_stop=directory/'prototype/memory-stop.json'
+    if memory_stop.is_file():
+        validity.update(passed=False,memory_guard=dict(status='INVALID',receipt=read(memory_stop)))
+    elif read(directory/'prototype/manifest.json').get('prototype',{}).get('gc_control'):
+        from .gc_control import memory_failures
+        state=directory/'prototype/gc_state.json'
+        transitions=read(state)['transitions'] if state.is_file() else []
+        samples=[r for r in (json.loads(line) for line in (directory/'prototype/progress.jsonl').read_text().splitlines()) if r.get('phase')=='memory']
+        failures=[]
+        for sample in samples:
+            failures.extend(memory_failures(sample))
+            if sample.get('invalid'):failures.append('recorded INVALID memory sample')
+        entries=[r for r in transitions if r['phase']=='loop_entry']
+        drains=[r for r in transitions if r['phase']=='drain_end']
+        if not samples or len(entries)!=1 or len(drains)!=1:failures.append('missing GC/memory evidence')
+        if any(r['enabled'] or r['frozen_count']<1 for r in entries+drains):failures.append('GC window state mismatch')
+        if failures:validity['passed']=False
+        validity['memory_guard']=dict(passed=not failures,samples=len(samples),failures=failures)
     return dict(metrics=metrics(events,jobs,manifest,*info["window"]),violations=violations,
                 validity=validity,
                 input_sha256=sha256_file(directory/"REPLAY_MANIFEST.json"))

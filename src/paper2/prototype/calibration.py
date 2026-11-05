@@ -13,7 +13,7 @@ from .analysis import distribution,costs
 from src.paper2.verify.invariants import check
 
 
-def calibrate_once(corpus_path,k,output,replicate,warmup=2,measurement=10):
+def calibrate_once(corpus_path,k,output,replicate,warmup=2,measurement=10,diagnostic=False):
     output=Path(output);output.mkdir(parents=True,exist_ok=False)
     corpus=json.loads(Path(corpus_path).read_text());backend=corpus["backend"]
     txs=list(corpus["transactions"].values())[:128]
@@ -21,9 +21,15 @@ def calibrate_once(corpus_path,k,output,replicate,warmup=2,measurement=10):
     block=next(iter(corpus["blocks"].values()))
     fixed=[("admission",signed_parts(t)) for t in txs]+[("block_tx",signed_parts(t)) for t in txs]+[("block_sig",signed_parts(block))]
     keys=list({parts[2] for _,parts in fixed})
-    workers=Workers(k,backend,keys)
-    samples=[];running={};serial=0;decision=[]
-    epoch=time.monotonic_ns();end=(warmup+measurement)*1e9
+    from .gc_control import WindowGC, MemorySampler
+    from .pause_attribution import PauseRecorder
+    from .progress import Progress
+    workers=Workers(k,backend,keys,0,60,str(output))
+    progress=Progress(output);monitor=PauseRecorder(output,detailed=diagnostic)
+    control=WindowGC(output,monitor)
+    sampler=MemorySampler(progress,output,[p.pid for p in workers.processes])
+    samples=[];running={};serial=0;decision=[];spans=[]
+    epoch=None;end=(warmup+measurement)*1e9
     def dispatch(worker):
         nonlocal serial
         begin=time.monotonic_ns();cls,parts=fixed[serial%len(fixed)];identity=str(serial);serial+=1
@@ -32,13 +38,17 @@ def calibrate_once(corpus_path,k,output,replicate,warmup=2,measurement=10):
         send=time.monotonic_ns();workers.pipes[worker].send(("verify",identity,*parts))
         running[worker]=(identity,cls,send)
     try:
+        control.enter();epoch=time.monotonic_ns();progress.phase('epoch',epoch_ns=epoch)
         for worker in range(k):dispatch(worker)
         while running:
+            sampler.sample()
             ready=wait([workers.pipes[w] for w in running],timeout=15)
             if not ready:raise TimeoutError("concurrency calibration worker stalled")
             for worker in list(running):
                 pipe=workers.pipes[worker]
                 if pipe not in ready:continue
+                span_begin=time.monotonic_ns()
+                if diagnostic:monitor.begin_span(len(spans),'_receive',span_begin)
                 reply=pipe.recv();receive=time.monotonic_ns();identity,cls,send=running.pop(worker)
                 if reply[0]!="result" or reply[1]!=identity or not reply[4]:
                     raise RuntimeError("fixed valid corpus failed verification")
@@ -47,12 +57,22 @@ def calibrate_once(corpus_path,k,output,replicate,warmup=2,measurement=10):
                     duration_ns=receive-send,primitive_ns=finish-start,job_class=cls,
                     source=f"concurrency-k{k}-rep{replicate}",send_ns=send-epoch,receive_ns=receive-epoch))
                 if receive-epoch<end:dispatch(worker)
-        workers.handshake("after")
-    finally:workers.close()
+                if diagnostic:
+                    span_end=time.monotonic_ns();monitor.end_span(span_end)
+                    spans.append(dict(id=len(spans),kind='_receive',start_ns=span_begin,end_ns=span_end,
+                                      start_t=(span_begin-epoch)/1e9,end_t=(span_end-epoch)/1e9))
+        progress.phase('drain_end',running=0)
+        control.leave();workers.handshake("after")
+    finally:
+        control.leave(partial=True);workers.close();monitor.finish(partial=bool(running));progress.close()
+    if diagnostic:
+        from .serialisation import write_json
+        write_json(output/'dispatcher_spans.json',spans)
     selected=[s for s in samples if warmup*1e9<=s["send_ns"]<end]
     with (output/"occupancy.csv").open("x",newline="") as f:
         writer=csv.DictWriter(f,fieldnames=tuple(samples[0]));writer.writeheader();writer.writerows(selected)
     result=dict(backend=backend,k=k,replicate=replicate,warmup=warmup,measurement=measurement,
+        epoch_ns=epoch,diagnostic_instrumentation=diagnostic,gc_control=dict(version=7,state='gc_state.json'),
         throughput=len(selected)/measurement,primitive_and_occupancy_samples=len(selected),
         selection_overhead_ns=distribution(decision),worker_metadata=workers.metadata,
         clock_offsets=workers.clock_records,samples=str(output/"occupancy.csv"))
@@ -62,7 +82,7 @@ def calibrate_once(corpus_path,k,output,replicate,warmup=2,measurement=10):
     for policy in ("fifo","block_priority"):
         config=dict(corpus["workload"],k=k,policy=dict(name=policy),q_max=10000,
             cache=dict(capacity=4096,ttl=2*corpus["workload"]["block_period"]),
-            pool=dict(enabled=True,capacity_bytes=16*1024*1024),output_dir=str(output/("dispatcher-"+policy)))
+            pool=dict(enabled=True,capacity_bytes=16*1024*1024),diagnostic_instrumentation=diagnostic,output_dir=str(output/("dispatcher-"+policy)))
         from src.paper2.model.service_times import sha256_file
         e,m=run(config,corpus_path,validated_sha256=sha256_file(Path(corpus_path)))
         violations=check(e,e.parent/"jobs.csv",m)

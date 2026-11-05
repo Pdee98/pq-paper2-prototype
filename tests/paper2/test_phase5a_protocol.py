@@ -250,6 +250,14 @@ class Protocol(unittest.TestCase):
             data=corpus.build(generate_workload(parameters(2560,0,.05,horizon=.1)))
             path=corpus.write(data,root/"corpus.json")
             result=calibrate_once(path,1,root/"calibration",0,warmup=.01,measurement=.8)
+            for directory in (root/'calibration',root/'calibration/worker-0'):
+                transitions=json.loads((directory/'gc_state.json').read_text())['transitions']
+                entry=next(r for r in transitions if r['phase']=='loop_entry')
+                drain=next(r for r in transitions if r['phase']=='drain_end')
+                self.assertFalse(entry['enabled']);self.assertFalse(drain['enabled'])
+                self.assertGreater(entry['frozen_count'],0)
+                pauses=json.loads((directory/'gc_pauses.json').read_text())['records']
+                self.assertEqual(len(pauses),1);self.assertEqual(pauses[0]['generation'],2)
             with Path(result["samples"]).open(newline="") as f:rows=list(csv.DictReader(f))
             self.assertEqual({r["job_class"] for r in rows},{"admission","block_tx","block_sig"})
             self.assertTrue(all(int(r["duration_ns"])>=int(r["primitive_ns"]) for r in rows))
