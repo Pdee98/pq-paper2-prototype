@@ -18,6 +18,9 @@ from src.paper2.model.engine import _git_state
 from src.paper2.model.service_times import ROOT, sha256_file
 from src.paper2.workload import generate_workload
 from . import corpus, public_corpus, replay, runner
+from .replay_progress import tracked_run, stage, owns_output, begin as progress_begin, end as progress_end
+from ..verify.observer import emit
+from .replay_budget import matrix_entry
 from .analysis import distribution, references, read_jobs
 from .calibration import calibrate_once
 from .progress import read_progress, phase_times
@@ -208,17 +211,18 @@ def may_prepare_validation(drain,calibration_utilisation,observed_busy,hit,first
             hit is not None and hit>=.9 and first_drop is None and not violations)
 
 
+@tracked_run
 def analyse(root,output,source_run_id,run_id=None):
     """Post-processing only, on x86 replay. Never computes G3 agreement."""
-    index,packet=verify(root,source_run_id,run_id);verify_checkout(index);output=Path(output).resolve()
+    index,packet=stage("input verification and corpus audit",verify,root,source_run_id,run_id);verify_checkout(index);output=Path(output).resolve()
     if packet is None:raise ValueError('no eligible diagnostic run; inspect skips')
     if output==ROOT or ROOT in output.parents:raise ValueError("diagnostic analysis must be outside checkout")
-    output.mkdir(parents=True,exist_ok=False)
-    proto=replay.postprocess_prototype(packet,output/"prototype-check")
-    meta=replay.read(packet/"prototype/manifest.json");p=meta["prototype"]
-    records=read_jobs(packet/"prototype/jobs.csv");seconds=[dict(second=s,arrived=0,admitted=0,started=0,completed=0,
+    output.mkdir(parents=True,exist_ok=owns_output(output))
+    proto=stage("prototype post-processing",replay.postprocess_prototype,packet,output/"prototype-check")
+    meta=stage("diagnostic metadata",replay.read,packet/"prototype/manifest.json");p=meta["prototype"]
+    records=stage("diagnostic job records",read_jobs,packet/"prototype/jobs.csv");seconds=[dict(second=s,arrived=0,admitted=0,started=0,completed=0,
         block_tx_hit=0,block_tx_miss=0,q_admission=0,q_block=0) for s in range(105)]
-    spans_raw=replay.read(packet/"prototype/dispatcher_spans.json")
+    spans_raw=stage("diagnostic dispatcher spans",replay.read,packet/"prototype/dispatcher_spans.json")
     spans=[]
     for row in spans_raw:
         a,b=row["start_t"],row["end_t"]
@@ -227,8 +231,12 @@ def analyse(root,output,source_run_id,run_id=None):
     spans=SpanIntegral(spans)
     admission_ends={};qa=qb=busy=0;previous=0.;idle=covered=0.;cursor=0;first_drop=None
     waiting_at_end={};waiting_at_start={}
+    progress_begin("diagnostic event analysis", total_events=p["event_buffer"]["rows"])
+    processed_events=0
     with (packet/"prototype/events.csv").open(newline="") as stream:
-        for r in csv.DictReader(stream):
+        for processed_events,r in enumerate(csv.DictReader(stream),1):
+            if processed_events % 4096 == 0:
+                emit("diagnostic events",events_processed=processed_events)
             t=float(r["t"]);end=min(105,t)
             k=meta['config']['k']
             if qa+qb>0 and busy<k and end>previous:
@@ -259,12 +267,14 @@ def analyse(root,output,source_run_id,run_id=None):
         r["block_tx_hit_rate"]=r["block_tx_hit"]/n if n else None
         r["dispatcher_busy_fraction"]=overlap(r["second"],r["second"]+1,spans)
         if first_drop is None and n and r["block_tx_hit_rate"]<.5 and 30<=r['second']<90:first_drop=r["second"]
+    progress_end("diagnostic event analysis",events_processed=processed_events)
     phases=read_progress(packet/"prototype/progress.jsonl");timing=phase_times(phases)
     observed_guard=overlap(30,90,spans)/60
     info=replay.read(packet/"info.json");cell=info["cell"]
     hit=proto["metrics"]["block_tx_cache_hit_rate"]
     drain=not p["incomplete"]
     eligible=may_prepare_validation(drain,cell["dispatcher_utilisation"],observed_guard,hit,first_drop,proto["violations"]) and proto['validity']['passed']
+    progress_begin("diagnostic summaries",job_records=len(records))
     occupancy={}
     for c in ("admission","block_tx","block_sig"):
         jobs=[j for j in records if j["job_class"]==c and "occupancy_ns" in j]
@@ -293,7 +303,7 @@ def analyse(root,output,source_run_id,run_id=None):
             if (j["worker_id"]==n["worker_id"] and "receive_ns" in j and
                     waiting_at_end.get(j["job_id"]) and waiting_at_start.get(n["job_id"])):
                 gaps.append((j["receive_ns"],n["send_ns"]))
-        pause_summary=summarise_pauses(replay.read(pause_files[0]),replay.read(pause_files[1]),spans_raw,gaps)
+        pause_summary=stage("pause attribution",summarise_pauses,replay.read(pause_files[0]),replay.read(pause_files[1]),spans_raw,gaps)
         pause_summary["gap_cohort"]="receive to next send, per worker; positive waiting counters at completion and after successor start; whole trace"
         callback_cost=packet/"prototype/callback_overhead.json"
         pause_summary["callback_overhead"]=(estimate_overhead(replay.read(pause_files[0]),replay.read(callback_cost),
@@ -308,9 +318,11 @@ def analyse(root,output,source_run_id,run_id=None):
         measurement_window_block_tx_hit_rate=hit,first_second_hit_rate_below_50_percent=first_drop,
         calibration_dispatcher_utilisation=cell["dispatcher_utilisation"],measurement_dispatcher_busy_fraction=observed_guard,
         idle_while_waiting_seconds=idle,idle_covered_seconds=covered,idle_uncovered_seconds=max(0,idle-covered),
-        public_corpus=public_corpus.inventory(root),
+        public_corpus=stage("public corpus inventory",public_corpus.inventory,root),
         next_action="AUTHOR REVIEW: preparation/serialisation caps may be recorded; not applied" if eligible and proto["validity"]["passed"] and not proto["violations"] else "STOP: report to author; do not prepare run #7",
         recommended_caps_seconds={name:2*timing[name] for name in ("preparation","serialisation")} if eligible and proto["validity"]["passed"] and not proto["violations"] else None)
+    progress_end("diagnostic summaries",job_records=len(records))
+    progress_begin("diagnostic serialisation",event_rows=p["event_buffer"]["rows"],job_records=len(records))
     for name,rows in (("per-second.csv",seconds),("admission-block-lags.csv",lags)):
         with (output/name).open("x",newline="") as stream:
             if rows:
@@ -318,7 +330,8 @@ def analyse(root,output,source_run_id,run_id=None):
     runner.save(output/"DIAGNOSTIC_REPORT.json",report)
     runner.save(output/"prototype-metrics.json",proto)
     (output/"DIAGNOSTIC_REPORT.md").write_text("# DIAGNOSTIC: excluded from G3\n\n"+report["next_action"]+"\n\n```json\n"+json.dumps(report,indent=2)+"\n```\n")
-    replay.seal(output,"RESULT_MANIFEST.json")
+    progress_end("diagnostic serialisation")
+    stage("result manifest",replay.seal,output,"RESULT_MANIFEST.json")
     return report
 
 
@@ -333,7 +346,7 @@ def main():
         collect(a.output)
     elif a.command=="prepare":
         index,_=verify(a.inputs,a.source_run_id)
-        matrix=json.dumps(dict(include=[dict(run_id=r['run_id']) for r in index.get('runs',[dict(run_id=RUN_ID)])]),separators=(",",":"))
+        matrix=json.dumps(dict(include=[matrix_entry(a.inputs,r['run_id']) for r in index.get('runs',[dict(run_id=RUN_ID)])]),separators=(",",":"))
         with open(os.environ["GITHUB_OUTPUT"],"a") as stream:
             stream.write("matrix="+matrix+"\ncode_commit="+index["code_commit"]+"\n")
     elif a.command=="run":analyse(a.inputs,a.output,a.source_run_id,a.run_id)

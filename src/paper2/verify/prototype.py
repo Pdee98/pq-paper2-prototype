@@ -5,6 +5,8 @@ Only raw signature-ID and wire-leaf derivations rely on the ARM audit receipt.
 """
 
 import hashlib
+import bisect
+import math
 import json
 from pathlib import Path
 import re
@@ -183,11 +185,11 @@ def inspect(rows,jobs,data,manifest):
     return errors,keys,intervals
 
 
-def overlap(intervals,a,b):
+def overlap_reference(intervals,a,b):
     return sum(max(0,min(b,end)-max(a,start)) for start,end in intervals)
 
 
-def covered(intervals,a,b):
+def covered_reference(intervals,a,b):
     cursor=a
     for start,end in intervals:
         if end<cursor:continue
@@ -195,3 +197,46 @@ def covered(intervals,a,b):
         cursor=max(cursor,end)
         if cursor>=b-1e-12:return True
     return b<=a
+
+
+class IndexedIntervals:
+    """Read-only span view; corrupt sequences retain reference scans."""
+    def __init__(self, intervals):
+        self.intervals = tuple(intervals)
+        self.starts = tuple(a for a, b in self.intervals)
+        self.ends = tuple(b for a, b in self.intervals)
+        self.canonical = (all(math.isfinite(a) and math.isfinite(b) and a <= b for a, b in self.intervals)
+            and all(a <= b for a, b in zip(self.starts, self.starts[1:]))
+            and all(a <= b for a, b in zip(self.ends, self.ends[1:])))
+    def __len__(self): return len(self.intervals)
+    def __iter__(self): return iter(self.intervals)
+    def __getitem__(self, index): return self.intervals[index]
+
+
+def _indexed(intervals, a, b):
+    return (isinstance(intervals, IndexedIntervals) and intervals.canonical
+        and isinstance(a, (int, float)) and isinstance(b, (int, float))
+        and math.isfinite(a) and math.isfinite(b))
+
+
+def covered(intervals, a, b):
+    if not _indexed(intervals, a, b):
+        return covered_reference(intervals, a, b)
+    cursor = a
+    for i in range(bisect.bisect_left(intervals.ends, a), len(intervals)):
+        start, end = intervals[i]
+        if end < cursor: continue
+        if start > cursor + 1e-12: return False
+        cursor = max(cursor, end)
+        if cursor >= b - 1e-12: return True
+    return b <= a
+
+
+def overlap(intervals, a, b):
+    if not _indexed(intervals, a, b):
+        return overlap_reference(intervals, a, b)
+    first = bisect.bisect_left(intervals.ends, a)
+    last = bisect.bisect_right(intervals.starts, b)
+    # Keep the original expression and summation order; omit only zero terms.
+    return sum(max(0, min(b, end) - max(a, start))
+        for start, end in (intervals[i] for i in range(first, last)))

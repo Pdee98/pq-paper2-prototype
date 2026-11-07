@@ -159,7 +159,8 @@ class Replay(unittest.TestCase):
         for expected in ("workflow_dispatch:","source_run_id:","actions: read","max-parallel: 20", "fail-fast: false", "if: always()", "github-token: ${{ github.token }}"):
             self.assertIn(expected,text)
         self.assertNotIn("push:",text);self.assertNotIn("pull_request:",text)
-        self.assertEqual(text.count("timeout-minutes: 120"),3)
+        self.assertEqual(text.count("timeout-minutes: 120"),2)
+        self.assertIn("timeout-minutes: ${{ matrix.timeout_minutes }}",text)
         self.assertIn("ref: ${{ needs.prepare.outputs.code_commit }}",text)
 
 

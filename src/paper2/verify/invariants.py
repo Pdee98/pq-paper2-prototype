@@ -5,6 +5,7 @@ import csv
 import hashlib
 import json
 import math
+from .observer import emit
 from pathlib import Path
 
 
@@ -20,6 +21,7 @@ def check(events_csv, jobs_csv, manifest):
         errors.append(dict(code=code, message=message, **context))
     def close(a, b):
         return a is not None and b is not None and math.isclose(a, b, rel_tol=0, abs_tol=1e-12)
+    emit("checker identity", events_loaded=len(rows), jobs_loaded=len(records))
     jobs = {j["job_id"]: j for j in records}
     if len(jobs) != len(records):
         bad("job_identity", "duplicate physical/logical job record")
@@ -29,12 +31,14 @@ def check(events_csv, jobs_csv, manifest):
     real_identity = identity_mode in ("real-time-v1", "real-byte-simulation-v1", "precomputed-key-replay-v1")
     real_keys, busy_spans = {}, []
     if real_identity:
-        from .prototype import inspect, covered, overlap
+        from .prototype import inspect, covered, overlap, IndexedIntervals
         try:
             extra, real_keys, busy_spans = inspect(rows, records, data, manifest)
             errors.extend(extra)
         except (KeyError, ValueError, TypeError, OSError) as exc:
             bad("prototype_evidence", "invalid prototype evidence: " + str(exc))
+    if real:
+        busy_spans = IndexedIntervals(busy_spans)
     k = cfg.get("k", 1)
     policy = cfg.get("policy", {"name": "fifo"})
     split = policy["name"] == "static_split"
@@ -46,7 +50,10 @@ def check(events_csv, jobs_csv, manifest):
     proofs, attachments, h0 = {}, collections.defaultdict(list), {}
     proof_keys = {}
     previous = -math.inf
+    emit("checker events", events_processed=0, total_events=len(rows))
     for i, row in enumerate(rows):
+        if i % 4096 == 0:
+            emit("checker events", events_processed=i, total_events=len(rows))
         t, event, jid = float(row["t"]), row["event"], row["job_id"]
         if int(row["seq"]) != i or t < previous:
             bad("chronology", "nonmonotone time or sequence", row=i)
@@ -133,15 +140,20 @@ def check(events_csv, jobs_csv, manifest):
         if i+1 == len(rows) or float(rows[i+1]["t"]) != t:
             all_waiting = dict(waiting, **direct, **selected)
             for w in range(k):
+                if w in active:
+                    continue
                 eligible_jobs = [j for j, c in all_waiting.items() if eligible(w, c)]
+                if not eligible_jobs:
+                    continue
                 accounted = real and i+1 < len(rows) and covered(busy_spans, t, float(rows[i+1]["t"]))
-                if w not in active and eligible_jobs and not accounted:
+                if not accounted:
                     bad("work_conservation", "idle eligible worker in settled state", t=t,
                         worker_ids=[w], waiting_job_ids=eligible_jobs)
     if active or waiting or direct or selected:
         bad("unfinished_work", "trace ended with running/waiting/reserved jobs")
     intervals = collections.defaultdict(list)
     serving = collections.defaultdict(list)
+    emit("checker jobs and coalescing", events_processed=len(rows))
     for job in records:
         jid = job["job_id"]
         if job["start_t"] is not None:
@@ -189,12 +201,14 @@ def check(events_csv, jobs_csv, manifest):
                 bad("coalesce_outcome", "decision not bound to invalid coalesced result", job_id=jid)
             if source["block_waiters"].count(bid) != 1 or starts[source["job_id"]] != 1 or ends[source["job_id"]] != 1:
                 bad("single_service", "coalesced source/block accounting is not unique", job_id=jid)
+    emit("checker worker intervals", job_records=len(records))
     for worker, spans in intervals.items():
         last = -math.inf
         for start, end, jid in sorted(spans):
             if start < last:
                 bad("worker_ownership", "job-record service intervals overlap", worker=worker, job_id=jid)
             last = max(last, end)
+    emit("checker block decisions", blocks=len(blocks))
     for i, spec in enumerate(cfg.get("blocks", [])):
         bid = spec["block_id"]
         arrival = arrivals.get(bid, blocks[bid]["arrival_t"])
@@ -214,6 +228,7 @@ def check(events_csv, jobs_csv, manifest):
                 bad("acceptance_safety", "accepted block has invalid signature service", block_id=bid)
         if blocks[bid]["pending"] != 0:
             bad("block_accounting", "decision has nonzero remaining work", block_id=bid)
+    emit("checker acceptance and ledger", accepted_records=len(data["accepted_transactions"]))
     balances = dict(cfg["genesis"]["balances"])
     nonces = dict(cfg["genesis"]["next_nonces"])
     for account in set(balances) | set(nonces):
@@ -247,4 +262,5 @@ def check(events_csv, jobs_csv, manifest):
         nonces.setdefault(r, 0)
     if dict(balances=balances, next_nonces=nonces) != data["ledger"]:
         bad("ledger_replay", "final ledger differs from replay")
+    emit("checker complete", events_processed=len(rows), violations=len(errors))
     return errors

@@ -16,6 +16,9 @@ from src.paper2.model.service_times import JOB_CLASSES, ROOT, sha256_file
 from src.paper2.verify.invariants import check
 from .analysis import BANDS, CapturedService, compare, costs, metrics, samples_from_jobs
 from . import public_corpus
+from .replay_progress import tracked_run, stage, owns_output
+from ..verify.observer import emit
+from .replay_budget import matrix_entry
 from .validity import from_events as prototype_validity
 
 SCHEMA="paper2-g3-replay-v1"
@@ -85,10 +88,11 @@ def verify_files(directory,name):
     if sha256_file(path)!=(directory/(name+".sha256")).read_text().strip():raise ValueError("replay manifest SHA-256 mismatch")
     data=read(path);seen=set()
     if data["schema"]!=SCHEMA:raise ValueError("unsupported replay schema")
-    for row in data["files"]:
+    for file_index, row in enumerate(data["files"]):
         file=safe_file(directory,row["path"])
         if row["path"] in seen or sha256_file(file)!=row["sha256"]:raise ValueError("replay payload SHA-256 mismatch: "+row["path"])
         seen.add(row["path"])
+        emit("input hashes", files_verified=file_index+1, total_files=len(data["files"]))
     actual={p.relative_to(directory).as_posix() for p in directory.rglob("*") if p.is_file()}
     if actual!=seen|{name,name+".sha256"}:raise ValueError("unlisted or missing replay files")
     return data
@@ -255,6 +259,11 @@ class ReplayModel(Model):
         self.config.update({k:v for k,v in config.items() if k not in model_config(config)})
         self.service=CapturedService(sample,read(self.directory/"info.json")["backend"])
         self.config["prototype"]=dict(mode="precomputed-key-replay-v1")
+    def _log(self, *args, **kwargs):
+        value = super()._log(*args, **kwargs)
+        if self.row_count % 4096 == 0:
+            emit("simulation", events_processed=self.row_count, jobs_created=len(self.jobs), simulation_t=self.t)
+        return value
     def _key(self,tx):return self.keys[tx["tx_id"]]["cache_key"]
     def extra_manifest(self,directory):
         return dict(prototype=dict(mode="precomputed-key-replay-v1",**{
@@ -271,16 +280,16 @@ def simulate(directory,sample,output):
 
 def postprocess_prototype(directory,output):
     directory=Path(directory)
-    verify_files(directory,"REPLAY_MANIFEST.json")
+    stage("prototype input verification",verify_files,directory,"REPLAY_MANIFEST.json")
     info=read(directory/"info.json")
-    manifest=public_corpus.checker_manifest(directory,output)
+    manifest=stage("compact corpus decode and relocation",public_corpus.checker_manifest,directory,output)
     events,jobs=directory/"prototype/events.csv",directory/"prototype/jobs.csv"
-    violations=check(events,jobs,manifest)
+    violations=stage("prototype invariant checker",check,events,jobs,manifest)
     config=read(directory/'config.json')
     if config.get('g3_input_version')==6:
         from .cycle_validity import from_logs
-        validity=from_logs(events,jobs,config,manifest,info['window'])
-    else:validity=prototype_validity(events,config,info['window'])
+        validity=stage('count-aware validity',from_logs,events,jobs,config,manifest,info['window'])
+    else:validity=stage('prototype validity',prototype_validity,events,config,info['window'])
     memory_stop=directory/'prototype/memory-stop.json'
     if memory_stop.is_file():
         validity.update(passed=False,memory_guard=dict(status='INVALID',receipt=read(memory_stop)))
@@ -299,38 +308,39 @@ def postprocess_prototype(directory,output):
         if any(r['enabled'] or r['frozen_count']<1 for r in entries+drains):failures.append('GC window state mismatch')
         if failures:validity['passed']=False
         validity['memory_guard']=dict(passed=not failures,samples=len(samples),failures=failures)
-    return dict(metrics=metrics(events,jobs,manifest,*info["window"]),violations=violations,
+    return dict(metrics=stage("prototype metrics",metrics,events,jobs,manifest,*info["window"]),violations=violations,
                 validity=validity,
                 input_sha256=sha256_file(directory/"REPLAY_MANIFEST.json"))
 
 
+@tracked_run
 def execute(root,run_id,output,source_run_id=None):
     root=Path(root);output=Path(output)
-    index=verify_index(root,source_run_id)
+    index=stage("input index verification",verify_index,root,source_run_id)
     if os.environ.get("GITHUB_ACTIONS")=="true" and _git_state()["commit"]!=index["code_commit"]:
         raise ValueError("replay checkout differs from recorded source commit")
     run=next((r for r in index["runs"] if r["run_id"]==run_id),None)
     if run is None:raise ValueError("unknown replay repetition")
-    directory,info=packet(root,index,run)
-    if output.exists():raise FileExistsError("replay outputs must be new")
+    directory,info=stage("input packet verification",packet,root,index,run)
+    if output.exists() and not owns_output(output):raise FileExistsError("replay outputs must be new")
     if output.resolve()==ROOT or ROOT in output.resolve().parents:raise ValueError("replay outputs must be outside checkout")
-    output.mkdir(parents=True)
+    output.mkdir(parents=True,exist_ok=owns_output(output))
     result=dict(run_id=run_id,cell_id=run["cell_id"],replicate=run["replicate"],cell=info["cell"],
         code_commit=index["code_commit"],source_run_id=index["source_run_id"],input_sha256=run["manifest_sha256"],
         seeds=info["seeds"])
     try:
-        result["prototype"]=postprocess_prototype(directory,output/"prototype-check")
+        result["prototype"]=stage("prototype post-processing",postprocess_prototype,directory,output/"prototype-check")
         if not result["prototype"]["validity"]["passed"] and info['cell'].get('role')!='secondary':
             result["status"]="INVALID: prototype validity guard"
             save(output/"result.json",result);seal(output,"RESULT_MANIFEST.json")
             return result
         for name,sample in (("primary","primary.csv"),("held_out","held-out.csv")):
-            begin=time.perf_counter();e,m=simulate(directory,directory/sample,output/name)
+            begin=time.perf_counter();e,m=stage(name+" simulation",simulate,directory,directory/sample,output/name)
             if read(m)["seeds"]!=info["seeds"]:raise ValueError("replay seed derivation differs from prototype")
-            sim=dict(metrics=metrics(e,e.parent/"jobs.csv",m,*info["window"]),
-                     violations=check(e,e.parent/"jobs.csv",m),elapsed=time.perf_counter()-begin)
+            sim=dict(metrics=stage(name+" metrics",metrics,e,e.parent/"jobs.csv",m,*info["window"]),
+                     violations=stage(name+" invariant checker",check,e,e.parent/"jobs.csv",m),elapsed=time.perf_counter()-begin)
             result[name]=sim
-            if info['cell'].get('role')!='secondary':result[name+"_comparison"]=compare(result["prototype"]["metrics"],sim["metrics"],diagnostic=name=="held_out")
+            if info['cell'].get('role')!='secondary':result[name+"_comparison"]=stage(name+" comparison",compare,result["prototype"]["metrics"],sim["metrics"],diagnostic=name=="held_out")
     except Exception as exc:result["execution_error"]=str(exc)
     save(output/"result.json",result);seal(output,"RESULT_MANIFEST.json")
     return result
@@ -444,7 +454,7 @@ def main():
     if not re.fullmatch(r"[0-9]+",args.source_run_id):p.error("source_run_id must be numeric")
     if args.command=="prepare":
         index=verify(args.inputs,args.source_run_id)
-        matrix=json.dumps(dict(include=[dict(run_id=r["run_id"]) for r in index["runs"]]),separators=(",",":"))
+        matrix=json.dumps(dict(include=[matrix_entry(args.inputs,r["run_id"]) for r in index["runs"]]),separators=(",",":"))
         print(matrix)
         if os.environ.get("GITHUB_OUTPUT"):
             with open(os.environ["GITHUB_OUTPUT"],"a",encoding="utf-8") as stream:
