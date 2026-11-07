@@ -134,6 +134,7 @@ class Replay(unittest.TestCase):
             self.assertIn("real_cache_key",{v["code"] for v in check(e,jobs,m)})
 
     def test_prepare_and_replay_cli_without_site_packages(self):
+        runner.hash_artifacts(self.inputs)
         env=dict(os.environ);env.pop("GITHUB_OUTPUT",None)
         common=[sys.executable,"-B","-S","-m","src.paper2.prototype.replay"]
         ready=subprocess.run(common+["prepare","--inputs",str(self.inputs),"--source-run-id","123"],

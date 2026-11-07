@@ -346,14 +346,11 @@ def execute(root):
 
 
 def hash_artifacts(root):
-    root=Path(root);root.mkdir(parents=True,exist_ok=True);rows=[]
-    for file in sorted(root.rglob("*")):
-        if file.is_file() and file.name!="SHA256SUMS":
-            h=hashlib.sha256()
-            with file.open("rb") as f:
-                for chunk in iter(lambda:f.read(1024*1024),b""):h.update(chunk)
-            rows.append(h.hexdigest()+"  "+file.relative_to(root).as_posix())
-    (root/"SHA256SUMS").write_bytes(("\n".join(rows)+"\n").encode())
+    from .artifact_integrity import write_checksums
+    root=Path(root)
+    # Replay receives this subtree as a separate artifact, so it needs its own inventory.
+    if (root/'replay-inputs').is_dir():write_checksums(root/'replay-inputs')
+    return write_checksums(root)
 
 
 def main():

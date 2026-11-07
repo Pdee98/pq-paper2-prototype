@@ -14,9 +14,39 @@ from ..verify.observer import OBSERVER
 
 CURRENT = ContextVar('paper2_replay_progress', default=None)
 
+
+def checkout_receipt():
+    from ..model.engine import _git_state
+    state = _git_state()
+    exported = state.get('exported', False)
+    return dict(replay_code_commit=None if exported else state['commit'],
+                replay_tree_clean=None if exported else not state['dirty'],
+                checkout_kind='export without Git checkout' if exported else 'git checkout',
+                export_source_commit=state['commit'] if exported else None)
+
+
+def record_source_commit(commit):
+    current = CURRENT.get()
+    if current is not None: current.source_commit = commit
+
+
+def result_provenance(directory):
+    current = CURRENT.get()
+    if current is not None:
+        return dict(source_code_commit=current.source_commit, **current.checkout)
+    previous = Path(directory)/'RESULT_MANIFEST.json'
+    if previous.is_file():
+        value = json.loads(previous.read_bytes()).get('provenance')
+        if value is not None: return value
+    result = Path(directory)/'result.json'
+    source = json.loads(result.read_bytes()).get('code_commit') if result.is_file() else None
+    return dict(source_code_commit=source, **checkout_receipt())
+
+
 class ReplayProgress:
     def __init__(self, output, interval=30):
         self.output = Path(output).resolve()
+        self.checkout = checkout_receipt(); self.source_commit = None
         self.stream = (self.output/'replay-progress.jsonl').open('x', encoding='utf-8', buffering=8192)
         self.lock = threading.RLock(); self.stop = threading.Event(); self.stack = []; self.counts = {}; self.closed = False
         self.interval = interval
@@ -104,8 +134,11 @@ def tracked_run(function):
             raise
         finally:
             if previous_handler is not None: signal.signal(signal.SIGTERM, previous_handler)
-            progress.close(status); OBSERVER.reset(observer); CURRENT.reset(token)
-            # The final seal covers the CLOSED progress file. Do not weaken inventory checks.
-            from .replay import seal
-            seal(output, 'RESULT_MANIFEST.json')
+            progress.close(status)
+            try:
+                # Seal closed progress and its actual replay-checkout receipt together.
+                from .replay import seal
+                seal(output, 'RESULT_MANIFEST.json')
+            finally:
+                OBSERVER.reset(observer); CURRENT.reset(token)
     return run

@@ -171,8 +171,8 @@ class Deviation5(unittest.TestCase):
         self.assertNotIn("primary",r["per_repetition"][0])
 
     def test_diagnostic_v2_retains_workload_identity_and_stop_rules(self):
-        self.assertEqual(diagnostic.PURPOSE,"DIAGNOSTIC v4")
-        self.assertEqual(diagnostic.RUN_ID,"paper2-g3-diag-v4")
+        self.assertEqual(diagnostic.PURPOSE,"DIAGNOSTIC v5")
+        self.assertEqual(diagnostic.RUN_ID,"paper2-g3-diag-v5")
         self.assertEqual(diagnostic.CELL0["rate"],1115.433019832252)
         self.assertFalse(diagnostic.may_prepare_validation(True,.2,.3,.95,1,[]))
         p=diagnostic.projection_historical()

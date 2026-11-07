@@ -69,8 +69,13 @@ class CompactCorpus(unittest.TestCase):
             self.assertEqual(len(c['public_keys']),len({entry['key_id'] for group in ('transactions','blocks') for entry in doc[group].values()}))
             # The new replay path recomputes keys from the compact corpus and
             # shares one archive across policy packets rather than duplicating it.
-            with held.open(newline='') as f:reader=csv.DictReader(f);fields=reader.fieldnames;rows=list(reader)
-            for row in rows:row['source']='concurrency-cycle-k1-rep0'
+            # Explicit toy calibration covers every class independently of live
+            # prototype cache hits. An all-hit trace has no block_tx samples,
+            # although resampling other classes can make replay execute one.
+            fields=('backend','operation','variant','duration_ns','primitive_ns','job_class','source')
+            rows=[dict(backend='sleep:'+cls,operation='verify',variant='valid',duration_ns=1000000,
+                       primitive_ns=1000000,job_class=cls,source='concurrency-cycle-k1-rep0')
+                  for cls in ('admission','block_tx','block_sig')]
             cycles=root/'cycles.csv'
             with cycles.open('w',newline='') as f:w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(rows)
             cfg=dict(doc['workload'],g3_input_version=6,calibration_cycle_means=dict.fromkeys(('admission','block_tx','block_sig'),.001))

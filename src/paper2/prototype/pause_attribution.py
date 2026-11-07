@@ -29,7 +29,7 @@ LABELS=("unknown","preparation","handler:_admission","handler:_block","handler:_
 CODES={s:i for i,s in enumerate(LABELS)}
 KINDS=("other","_admission","_block","_receive")
 HEADER=64
-FILES=(".pause_gc.bin",".pause_spans.bin",".pause_steps.bin")
+FILES=("pause_gc.bin","pause_spans.bin","pause_steps.bin")
 FORMATS=(struct.Struct("<QQqqq"),struct.Struct("<QQQQQ"),struct.Struct("<QQQ"))
 MAGICS=(b"P2GCPA01",b"P2SPNA01",b"P2STPA01")
 

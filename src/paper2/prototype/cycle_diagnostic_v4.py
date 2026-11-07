@@ -19,8 +19,8 @@ TIMEOUTS={'pilot':600,'calibration':1800,'presigning':900,'preparation':900,
           'prototype window':110,'serialisation':1200}
 
 
-def parameters(rate, period, horizon=90):
-    return dict(runner.parameters(rate,0,period,horizon),run_id=RUN_ID)
+def parameters(rate, period, horizon=90, run_id=RUN_ID):
+    return dict(runner.parameters(rate,0,period,horizon),run_id=run_id)
 
 
 def message_counts(p):
@@ -69,34 +69,35 @@ def presign(workload,backend,processes,destination):
     return dict(path=str(cp),sha256=sha256_file(cp),transactions=len(doc['transactions']))
 
 
-def collect(root):
+def collect(root, *, run_id=RUN_ID, planning_projection=None):
     from . import diagnostic as d
     d.preflight();root=Path(root).resolve()
     if root==runner.ROOT or runner.ROOT in root.parents:raise ValueError('diagnostic output must be outside checkout')
     if not (root/'conformance.json').is_file():raise RuntimeError('native conformance required')
     host=replay.read(root/'host.json')
     if 'memory' not in host:raise RuntimeError('host total/available memory receipt required')
-    state=dict(purpose=d.PURPOSE,run_id=RUN_ID,status='DIAGNOSTIC: collecting',excluded_from_G3=True,
+    purpose='DIAGNOSTIC '+run_id.rsplit('-',1)[-1]
+    state=dict(purpose=purpose,run_id=run_id,status='DIAGNOSTIC: collecting',excluded_from_G3=True,
                code_commit=os.environ.get('GITHUB_SHA') or _git_state()['commit'],
-               source_run_id=os.environ.get('GITHUB_RUN_ID','local'),projection=projection(),
+               source_run_id=os.environ.get('GITHUB_RUN_ID','local'),projection=projection() if planning_projection is None else planning_projection,
                host_total_memory_bytes=host['memory']['total_bytes'],runs=[],skipped_cells=[])
     runner.save(root/'protocol.json',state);refs={};sizes={};started=time.perf_counter()
     inputs=root/'replay-inputs';inputs.mkdir()
-    index=dict(purpose=d.PURPOSE,run_id=RUN_ID,code_commit=state['code_commit'],
+    index=dict(purpose=purpose,run_id=run_id,code_commit=state['code_commit'],
                source_run_id=state['source_run_id'],runs=[],skipped_cells=[],status='DIAGNOSTIC: collecting')
     def index_save():
         replay.save(inputs/'DIAGNOSTIC_INDEX.json',index)
         (inputs/'DIAGNOSTIC_INDEX.sha256').write_bytes((sha256_file(inputs/'DIAGNOSTIC_INDEX.json')+'\n').encode())
     index_save()
     try:
-        with tempfile.TemporaryDirectory(prefix='paper2-v4-private-') as td:
+        with tempfile.TemporaryDirectory(prefix=run_id+'-private-') as td:
             private=Path(td)
             for backend in BACKENDS:
                 at=time.perf_counter()
-                pilot=runner.fresh(presign,(parameters(2560,.05,.1),backend,1,private/(backend+'-pilot.json')),TIMEOUTS['pilot'])
+                pilot=runner.fresh(presign,(parameters(2560,.05,.1,run_id),backend,1,private/(backend+'-pilot.json')),TIMEOUTS['pilot'])
                 state.setdefault('pilot_seconds',{})[backend]=time.perf_counter()-at;at=time.perf_counter()
                 refs[backend]=calibrate_backend(backend,pilot['path'],root,timeout=TIMEOUTS['calibration'],
-                                               diagnostic=True,seed_tag='-'+RUN_ID)
+                                               diagnostic=True,seed_tag='-'+run_id)
                 state.setdefault('calibration_seconds',{})[backend]=time.perf_counter()-at
                 archive=public_corpus.write_archive(replay.read(pilot['path']),private/(backend+'-size.zip'),full_path=pilot['path'])
                 sizes[backend]={f+'_per_tx':archive[f]/pilot['transactions'] for f in ('compressed_bytes','uncompressed_bytes')}
@@ -110,12 +111,12 @@ def collect(root):
                 ref=refs[backend][k];load=next(v for v in cold_cycle_loads(ref) if v['rho_cold']==.85)
                 cell=dict(ref,backend=backend,policy='fifo',rho=.85,**load,
                           B_cold=ref['B_cold_cycle'],B_ref=ref['B_ref_cycle'],g3_input_version=6)
-                rid=f'{RUN_ID}-{backend}-k{k}'
+                rid=f'{run_id}-{backend}-k{k}'
                 if cell['dispatcher_utilisation']>.5:
                     row=dict(run_id=rid,cell=cell,reason=replay.EXCLUSION)
                     state['skipped_cells'].append(row);index['skipped_cells'].append(row);index_save();continue
                 at=time.perf_counter()
-                receipt=runner.fresh(presign,(parameters(cell['rate'],cell['period']),backend,2,private/(rid+'.json')),TIMEOUTS['presigning'])
+                receipt=runner.fresh(presign,(parameters(cell['rate'],cell['period'],run_id=run_id),backend,2,private/(rid+'.json')),TIMEOUTS['presigning'])
                 signing=time.perf_counter()-at;cp=Path(receipt['path']);doc=replay.read(cp)
                 config=dict(runner.settings(doc['workload'],cell,root/'prototypes'/rid),g3_input_version=6,
                             calibration_cycle_means=ref['cycle_means'],diagnostic_instrumentation=True)

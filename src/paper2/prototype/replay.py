@@ -16,7 +16,7 @@ from src.paper2.model.service_times import JOB_CLASSES, ROOT, sha256_file
 from src.paper2.verify.invariants import check
 from .analysis import BANDS, CapturedService, compare, costs, metrics, samples_from_jobs
 from . import public_corpus
-from .replay_progress import tracked_run, stage, owns_output
+from .replay_progress import tracked_run, stage, owns_output, record_source_commit
 from ..verify.observer import emit
 from .replay_budget import matrix_entry
 from .validity import from_events as prototype_validity
@@ -78,7 +78,12 @@ def seal(directory,name,extra=None):
     directory=Path(directory)
     files=[dict(path=p.relative_to(directory).as_posix(),sha256=sha256_file(p))
            for p in sorted(directory.rglob("*")) if p.is_file() and p.name not in (name,name+".sha256")]
-    manifest=dict(schema=SCHEMA,files=files,**(extra or {}));save(directory/name,manifest)
+    manifest=dict(schema=SCHEMA,files=files,**(extra or {}))
+    if name=='RESULT_MANIFEST.json':
+        from .replay_progress import result_provenance
+        # Read any existing receipt before replacing the manifest.
+        manifest['provenance']=result_provenance(directory)
+    save(directory/name,manifest)
     (directory/(name+".sha256")).write_bytes((sha256_file(directory/name)+"\n").encode())
     return manifest
 
@@ -225,8 +230,11 @@ def packet(root,index,run):
 
 
 def verify(root,source_run_id=None):
+    from .artifact_integrity import verify_if_present
+    checksums=verify_if_present(root)
     index=verify_index(root,source_run_id)
     allowed={"INDEX.json","INDEX.sha256"}
+    if checksums is not None:allowed.add('SHA256SUMS')
     for run in index["runs"]:
         directory,info=packet(root,index,run)
         if info.get('public_corpus_ref'):
@@ -322,6 +330,7 @@ def execute(root,run_id,output,source_run_id=None):
     run=next((r for r in index["runs"] if r["run_id"]==run_id),None)
     if run is None:raise ValueError("unknown replay repetition")
     directory,info=stage("input packet verification",packet,root,index,run)
+    record_source_commit(index['code_commit'])
     if output.exists() and not owns_output(output):raise FileExistsError("replay outputs must be new")
     if output.resolve()==ROOT or ROOT in output.resolve().parents:raise ValueError("replay outputs must be outside checkout")
     output.mkdir(parents=True,exist_ok=owns_output(output))
@@ -452,6 +461,8 @@ def main():
     p.add_argument("--run-id");p.add_argument("--results",type=Path);p.add_argument("--output",type=Path)
     args=p.parse_args()
     if not re.fullmatch(r"[0-9]+",args.source_run_id):p.error("source_run_id must be numeric")
+    from .artifact_integrity import verify_checksums
+    verify_checksums(args.inputs)
     if args.command=="prepare":
         index=verify(args.inputs,args.source_run_id)
         matrix=json.dumps(dict(include=[matrix_entry(args.inputs,r["run_id"]) for r in index["runs"]]),separators=(",",":"))

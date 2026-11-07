@@ -18,7 +18,7 @@ from src.paper2.model.engine import _git_state
 from src.paper2.model.service_times import ROOT, sha256_file
 from src.paper2.workload import generate_workload
 from . import corpus, public_corpus, replay, runner
-from .replay_progress import tracked_run, stage, owns_output, begin as progress_begin, end as progress_end
+from .replay_progress import tracked_run, stage, owns_output, record_source_commit, begin as progress_begin, end as progress_end
 from ..verify.observer import emit
 from .replay_budget import matrix_entry
 from .analysis import distribution, references, read_jobs
@@ -26,8 +26,8 @@ from .calibration import calibrate_once
 from .progress import read_progress, phase_times
 from .pause_attribution import summarise as summarise_pauses, estimate_overhead
 
-RUN_ID="paper2-g3-diag-v4"
-PURPOSE="DIAGNOSTIC v4"
+RUN_ID="paper2-g3-diag-v5"
+PURPOSE="DIAGNOSTIC v5"
 CELL0=dict(backend="xmss",k=1,policy="fifo",rho=.5,rate=1115.433019832252,
            period=.11475364071546823,B_ref=2230.866039664504,B_cold=1119.102530780535)
 # Diagnostic watchdogs only. Production preparation/serialisation caps remain unset.
@@ -159,16 +159,18 @@ def collect_historical(root):
 
 
 def projection():
-    from .cycle_diagnostic_v4 import projection as v4_projection
-    return v4_projection()
+    from .cycle_diagnostic_v5 import projection as v5_projection
+    return v5_projection()
 
 
 def collect(root):
-    from .cycle_diagnostic_v4 import collect as v4_collect
-    return v4_collect(root)
+    from .cycle_diagnostic_v5 import collect as v5_collect
+    return v5_collect(root)
 
 
 def verify(root,source_run_id,run_id=None):
+    from .artifact_integrity import verify_if_present
+    verify_if_present(root)
     root=Path(root);path=root/"DIAGNOSTIC_INDEX.json";index=replay.read(path)
     if sha256_file(path)!=(root/"DIAGNOSTIC_INDEX.sha256").read_text().strip():raise ValueError("diagnostic index SHA-256 mismatch")
     if index["purpose"]!=PURPOSE or index["run_id"]!=RUN_ID or index["source_run_id"]!=str(source_run_id):
@@ -215,6 +217,7 @@ def may_prepare_validation(drain,calibration_utilisation,observed_busy,hit,first
 def analyse(root,output,source_run_id,run_id=None):
     """Post-processing only, on x86 replay. Never computes G3 agreement."""
     index,packet=stage("input verification and corpus audit",verify,root,source_run_id,run_id);verify_checkout(index);output=Path(output).resolve()
+    record_source_commit(index['code_commit'])
     if packet is None:raise ValueError('no eligible diagnostic run; inspect skips')
     if output==ROOT or ROOT in output.parents:raise ValueError("diagnostic analysis must be outside checkout")
     output.mkdir(parents=True,exist_ok=owns_output(output))
@@ -339,6 +342,9 @@ def main():
     p=argparse.ArgumentParser();p.add_argument("command",choices=("preflight","projection","collect","prepare","run","gather"))
     p.add_argument("--output",type=Path);p.add_argument("--inputs",type=Path);p.add_argument("--source-run-id")
     p.add_argument("--run-id");p.add_argument("--results",type=Path);a=p.parse_args()
+    if a.command in ('prepare','run','gather'):
+        from .artifact_integrity import verify_checksums
+        verify_checksums(a.inputs)
     if a.command=="preflight":preflight()
     elif a.command=="projection":print(json.dumps(projection(),indent=2))
     elif a.command=="collect":
@@ -361,7 +367,7 @@ def main():
         import shutil
         a.output.mkdir(parents=True,exist_ok=False)
         for path,report in zip(found,reports):shutil.copytree(path.parent,a.output/report.get('run_id',RUN_ID))
-        runner.save(a.output/'DIAGNOSTIC_V4_SUMMARY.json',dict(purpose=PURPOSE,excluded_from_G3=True,
+        runner.save(a.output/'DIAGNOSTIC_V5_SUMMARY.json',dict(purpose=PURPOSE,excluded_from_G3=True,
             skipped_cells=index.get('skipped_cells',[]),cells=reports,
             next_action='AUTHOR REVIEW' if reports and all(r['next_action'].startswith('AUTHOR REVIEW') for r in reports) else 'STOP: report to author'))
 

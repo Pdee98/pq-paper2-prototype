@@ -49,11 +49,12 @@ jobs:
         if: always()
         run: python -m src.paper2.prototype.public_corpus "$G3_ARTIFACTS"
       - name: Hash all artifacts, including partial failures
+        id: artifact_hashes
         if: always()
         timeout-minutes: 2
         run: python -m src.paper2.prototype.runner --hash-artifacts "$G3_ARTIFACTS"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always() && steps.corpus_audit.outcome == 'success'
+        if: always() && steps.corpus_audit.outcome == 'success' && steps.artifact_hashes.outcome == 'success'
         timeout-minutes: 8
         with:
           name: paper2-g3-${{ github.run_id }}-${{ github.run_attempt }}
@@ -62,7 +63,7 @@ jobs:
           retention-days: 30
       - name: Upload audited public replay inputs
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always() && steps.corpus_audit.outcome == 'success'
+        if: always() && steps.corpus_audit.outcome == 'success' && steps.artifact_hashes.outcome == 'success'
         timeout-minutes: 8
         with:
           name: paper2-g3-replay-inputs-${{ github.run_id }}

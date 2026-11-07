@@ -1,4 +1,4 @@
-name: Paper 2 G3 ARM diagnostic v4 (excluded from G3)
+name: Paper 2 G3 ARM diagnostic v5 (excluded from G3)
 on:
   workflow_dispatch:
 permissions:
@@ -19,7 +19,7 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: '3.13'
-      - name: DIAGNOSTIC v4 build, two-backend calibration and three prototype runs
+      - name: DIAGNOSTIC v5 build, two-backend calibration and three prototype runs
         shell: bash
         run: |
           mkdir -p "$G3_ARTIFACTS"
@@ -49,11 +49,12 @@ jobs:
         if: always()
         run: python -m src.paper2.prototype.public_corpus "$G3_ARTIFACTS"
       - name: Hash all artifacts, including partial failures
+        id: artifact_hashes
         if: always()
         timeout-minutes: 2
         run: python -m src.paper2.prototype.runner --hash-artifacts "$G3_ARTIFACTS"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always() && steps.corpus_audit.outcome == 'success'
+        if: always() && steps.corpus_audit.outcome == 'success' && steps.artifact_hashes.outcome == 'success'
         timeout-minutes: 8
         with:
           name: paper2-g3-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
@@ -62,7 +63,7 @@ jobs:
           retention-days: 30
       - name: Upload audited public replay inputs
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always() && steps.corpus_audit.outcome == 'success'
+        if: always() && steps.corpus_audit.outcome == 'success' && steps.artifact_hashes.outcome == 'success'
         timeout-minutes: 8
         with:
           name: paper2-g3-diagnostic-inputs-${{ github.run_id }}
