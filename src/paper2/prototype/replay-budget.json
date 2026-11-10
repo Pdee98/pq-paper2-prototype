@@ -1,21 +1,23 @@
 {
-  "schema": "paper2-replay-budget-v1",
-  "fixed_seconds": 60,
-  "seconds_per_transaction": 0.023893190639536103,
-  "basis": "Non-isolated local-host diagnostic: full prototype post-processing plus primary/held-out simulations, invariant checks, metrics and comparisons on a bounded v4 XMSS k2 prefix; conservative whole-cost linear extrapolation plus fixed reserve; not a G3 parameter.",
-  "measured_events": 32978,
-  "measured_transactions": 2361,
-  "measured_phase_seconds": {
-    "diagnostic": 26.950905399979092,
-    "primary_simulation": 8.997261699987575,
-    "primary_checker": 0.8806034000590444,
-    "primary_metrics": 0.697056100005284,
-    "primary_comparison": 3.1100003980100155e-05,
-    "held_out_simulation": 17.148101300001144,
-    "held_out_checker": 1.0061700999503955,
-    "held_out_metrics": 0.7315843999385834,
-    "held_out_comparison": 0.00010960001964122057
+  "reference_transactions": 117292,
+  "reserve_seconds": 60,
+  "components": {
+    "input_verification_seconds": 18.334331235,
+    "prototype_postprocessing_seconds": 96.051378857,
+    "simulations_seconds": 96.0,
+    "simulation_checks_metrics_seconds": 116.77174246599999,
+    "comparisons_seconds": 0.179016915
   },
-  "evidence_sha256": "39e47d98e5b95bc9f935be935bd6e7b52e69ed1251660a3da8cc510f9eaeaf60",
-  "timeout_rule": "max(60,ceil(2*projected_seconds/60)); refuse above 330"
+  "seconds_per_transaction": 0.0027907825723237733,
+  "fixed_seconds": 60,
+  "sources": {
+    "v5": "DIAGNOSTIC_ARM_V5_42354911778.md; xmss-k2 replay-progress enclosing post-processing (no nested phase double count); prototype checker/metrics proxies for each simulation",
+    "timing": "timing-only-42810668345; each simulation rounded up to 48.0 s",
+    "comparison": {
+      "receipt_sha256": "b97be4e358c89317dca30cd6e800385222304d09ec8117651f322cf07432b2ff",
+      "transactions": 240,
+      "seconds": 0.0003663,
+      "host": "NON-ISOLATED local synthetic dry-run receipt; runner metadata NOT RECORDED"
+    }
+  }
 }

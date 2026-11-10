@@ -83,11 +83,26 @@ class PreV5(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'checkout differs'):diagnostic.verify_checkout(dict(code_commit='a'*40))
 
     def test_uploads_require_successful_complete_visible_inventory(self):
-        for name in ('paper2-g3.yml','paper2-g3-diagnostic.yml'):
-            text=Path(runner.__file__).with_name(name).read_text()
-            self.assertIn('id: artifact_hashes',text)
-            self.assertEqual(text.count("steps.artifact_hashes.outcome == 'success'"),2)
+        import re
+        for template in Path(runner.__file__).parent.glob('paper2-g3*.yml'):
+            text=template.read_text()
+            for block in re.split(r'(?=^      - )',text,flags=re.M):
+                if 'uses: actions/upload-artifact@' not in block:continue
+                condition=re.search(r'^        if: (.+)$',block,re.M).group(1)
+                if 'name: failed-attempt-evidence-' in block:
+                    self.assertIn("steps.failure_evidence.outcome == 'success'",condition)
+                    self.assertIn('PAPER2_FAILURE_EVIDENCE',block)
+                else:
+                    self.assertNotIn('always()',condition)
+                    self.assertIn('success()',condition)
+                    self.assertRegex(condition,r"steps\.inventory_verified_\d+\.outcome == 'success'")
+                    self.assertRegex(condition,r"steps\.seal_verified_\d+\.outcome == 'success'")
+            self.assertIn('/UNVERIFIED',text)
             self.assertNotIn('include-hidden-files: true',text)
+        # Distinctly named failure material is rejected before any replay input read.
+        from src.paper2.prototype import replay
+        with tempfile.TemporaryDirectory(prefix='failed-attempt-evidence-') as td:
+            with self.assertRaisesRegex(ValueError,'UNVERIFIED'):replay.verify_index(td)
 
     def test_v5_reuses_same_cells_and_timeouts_with_fresh_seeds(self):
         self.assertEqual(v5.RUN_ID,'paper2-g3-diag-v5')

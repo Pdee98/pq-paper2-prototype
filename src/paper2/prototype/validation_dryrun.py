@@ -16,7 +16,8 @@ SCENARIOS={'pass':'PASS','band_and_invalid':'FAIL','invalid_invariant':'FAIL',
     'one_invalid':'INCONCLUSIVE','two_invalid':'INCONCLUSIVE',
     'replacement_pass':'PASS','replacement_fail':'FAIL','replacement_invalid':'INCONCLUSIVE',
     'replacement_invalid_invariant':'FAIL','secondary_missing':'PASS','secondary_error':'PASS',
-    'secondary_disagree':'PASS','secondary_invariant':'FAIL','two_source':'PASS','part_rerun':'PASS'}
+    'secondary_disagree':'PASS','secondary_invariant':'FAIL','two_source':'PASS','part_rerun':'PASS',
+    'drain_only':'INCONCLUSIVE','dispatcher_load_only':'INCONCLUSIVE','dip_only':'PASS'}
 
 
 def create(output,scenario):
@@ -45,19 +46,39 @@ def create(output,scenario):
         for run in index['runs']:
             i,rep=run['cell_id'],run['replicate'];rid=run['run_id'];cell=cells[i]
             if cell.get('role')=='secondary' and scenario=='secondary_missing':continue
-            bad=(i==0 and ((rep==0 and scenario not in ('pass','secondary_missing','secondary_error','secondary_disagree','secondary_invariant','two_source','part_rerun')) or
+            bad=(i==0 and ((rep==0 and scenario not in ('pass','secondary_missing','secondary_error','secondary_disagree','secondary_invariant','two_source','part_rerun','drain_only','dispatcher_load_only','dip_only')) or
                           (rep==1 and scenario=='two_invalid') or (rep==3 and scenario in ('replacement_invalid','replacement_invalid_invariant'))))
+            admissions=[dict(tx_id=f't{j}',arrival_t=30) for j in range(240)]
+            blocks=[dict(block_id='B',tx_ids=[f't{j}' for j in range(240)])]
+            extra={};stop_t=32
+            special=i==0 and rep==0
+            if special and scenario=='drain_only':
+                # A drain-window enqueue is outside both measured cohorts, but still active at 105.
+                admissions.append(dict(tx_id='late',arrival_t=105));stop_t=106
+            if special and scenario=='dip_only':
+                # One unseen check at 30.5, then 240 hits at 31: cohort >90%, one bin 0%.
+                admissions.append(dict(tx_id='unseen',arrival_t=30.75))
+                blocks.insert(0,dict(block_id='C',tx_ids=['unseen']));extra['block_times']=[30.5,31]
             cfg=config(q_max=1000,run_id='SYNTHETIC-g3-'+rid,replicate=rep,k=cell['k'],policy=dict(name=cell['policy']),
-                admissions=[dict(tx_id=f't{j}',arrival_t=30) for j in range(240)],
-                blocks=[dict(block_id='B',tx_ids=[f't{j}' for j in range(240)])],block_start=31,
+                admissions=admissions,blocks=blocks,block_start=31,**extra,
                 cache=dict(capacity=4096,ttl=100),pool=dict(enabled=True,capacity_bytes=1000000),
                 g3_input_version=6,calibration_cycle_means=dict.fromkeys(('admission','block_tx','block_sig'),.1 if bad else .001))
             doc=corpus.build(cfg,'sleep');cp=corpus.write(doc,private/(rid+'.json'))
             cfg=dict(doc['workload'],g3_input_version=6,calibration_cycle_means=cfg['calibration_cycle_means'],output_dir=str(private/rid))
             clock=Clock(duration=1000000)
+            model_type=runtime.RealtimeModel
+            if special and scenario=='dispatcher_load_only':
+                class BusyFixture(model_type):
+                    def __init__(self,*args,**kwargs):
+                        super().__init__(*args,**kwargs)
+                        self._schedule(32,2,self.synthetic_busy)
+                    def synthetic_busy(self):
+                        # Recorded/anchored dispatcher work, with no worker job left waiting.
+                        clock.advance(31)
+                model_type=BusyFixture;stop_t=64
             def memory(pids=()):return dict(parent_pid=os.getpid(),rss_bytes={str(os.getpid()):100*1024**2},available_bytes=8*1024**3,total_bytes=16*1024**3)
-            with clock.patches(),patch('src.paper2.prototype.gc_control.memory_snapshot',side_effect=memory):
-                e,m=runtime.run(cfg,cp,stop_t=32,sleep_seconds=.001)
+            with clock.patches(),patch('src.paper2.prototype.gc_control.memory_snapshot',side_effect=memory),patch.object(runtime,'RealtimeModel',model_type):
+                e,m=runtime.run(cfg,cp,stop_t=stop_t,sleep_seconds=.001)
             if (scenario=='invalid_invariant' and i==0 and rep==0) or (scenario=='replacement_invalid_invariant' and i==0 and rep==3) or (scenario=='secondary_invariant' and cell.get('role')=='secondary'):
                 manifest=replay.read(m);manifest['blocks']['B']['deadline_t']+=1;replay.save(m,manifest)
             fail_band=i==0 and ((scenario=='band_and_invalid' and rep==1) or (scenario=='replacement_fail' and rep==3))
@@ -116,6 +137,18 @@ def assert_report(directory,scenario):
     report=replay.read(Path(directory)/'G3_STATUS.json')
     if report['verdict']!=SCENARIOS[scenario]:raise AssertionError((scenario,report))
     cell=report['aggregates'][0]
+    if scenario in ('drain_only','dispatcher_load_only','dip_only'):
+        row=next(r for r in report['per_repetition'] if r['run_id']=='cell0-r0')
+        validity=row['prototype_validity'];conditions=validity['measurement_conditions']
+        if row['failures'] or not all(c['passed'] for c in validity['class_checks'].values()) or not validity['memory_guard']['passed'] or validity['measurement_block_tx_hit_rate']<.9:
+            raise AssertionError('measurement fixture has unrelated failure')
+        expected=dict(drain_only=(False,True),dispatcher_load_only=(True,False),dip_only=(True,True))[scenario]
+        if (conditions['drain']['passed'],conditions['observed_dispatcher_load']['passed'])!=expected:
+            raise AssertionError('wrong measurement condition exercised')
+        if scenario=='dip_only':
+            diagnostic=conditions['cache_bin_diagnostic']
+            if not row['valid'] or diagnostic['minimum_one_second_hit_rate']!=0 or diagnostic['first_one_second_below_50']!=30:
+                raise AssertionError('dip must be diagnostic only')
     if scenario=='one_invalid' and report['followup_plan']!=[dict(cell_id=0,replicate=3,reason='exactly one initial INVALID')]:raise AssertionError('follow-up plan')
     if scenario in ('two_invalid','replacement_invalid') and report['followup_plan']:raise AssertionError('unauthorised replacement')
     if any(r['replicate'] in (4,5) for r in report['per_repetition']):raise AssertionError('replicate 4/5 scheduled')

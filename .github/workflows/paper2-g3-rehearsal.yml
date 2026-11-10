@@ -1,0 +1,315 @@
+name: Paper 2 G3 DIAGNOSTIC production rehearsal
+run-name: Paper2 G3 DIAGNOSTIC rehearsal
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  g3:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 330
+    concurrency:
+      group: paper2-g3-${{ github.sha }}-rehearsal
+      cancel-in-progress: false
+    env:
+      PAPER2_WORK_TOKEN: ${{ github.run_id }}-${{ github.job }}
+      PYTHONDONTWRITEBYTECODE: '1'
+      PAPER2_RUNNER_LABEL: ubuntu-24.04-arm
+      GH_TOKEN: ${{ github.token }}
+      PART: 7X
+      ATTEMPT: 1
+      MODE: initial
+      PURPOSE: paper2-g3-rehearsal-v1
+      PREVIOUS_RUN: ''
+      AGGREGATE_RUN: ''
+      FOLLOWUP_CELLS: ''
+    steps:
+      - name: Set runner-temp paths
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/paper2-production/control"
+          cat > "$RUNNER_TEMP/paper2-job-watchdog.py" <<'PAPER2_WATCHDOG'
+          """Standalone Linux job watchdog; embedded verbatim before checkout in ARM jobs.
+
+          It kills tagged work processes, including Action processes, but exempts failure
+          evidence steps. No repository imports: system Python can start it in step one.
+          """
+          import argparse
+          import json
+          import os
+          from pathlib import Path
+          import signal
+          import subprocess
+          import time
+
+          LIMIT = 280*60
+
+
+          def start(root, seconds=LIMIT):
+              root=Path(root);root.mkdir(parents=True,exist_ok=True)
+              path=root/'watchdog.json'
+              if not path.exists():
+                  path.write_text(json.dumps(dict(monotonic_ns=time.monotonic_ns(),work_seconds=seconds,work_minutes=280)))
+              return json.loads(path.read_text())
+
+
+          def require(root, cap=0):
+              root=Path(root);record=json.loads((root/'watchdog.json').read_text())
+              remaining=record.get('work_seconds',LIMIT)-(time.monotonic_ns()-record['monotonic_ns'])/1e9
+              if (root.parent/'WATCHDOG_EXPIRED.json').exists() or remaining<=0 or cap>remaining:
+                  raise TimeoutError('stage cap exceeds remaining 280-minute work budget')
+              return remaining
+
+
+          def tagged_processes(token):
+              selected=set();parents={}
+              for path in Path('/proc').iterdir():
+                  if not path.name.isdigit():continue
+                  try:
+                      pid=int(path.name);raw=(path/'environ').read_bytes().split(b'\0')
+                      parents[pid]=int((path/'stat').read_text().rsplit(')',1)[1].split()[1])
+                      if b'PAPER2_WORK_TOKEN='+token.encode() in raw and b'PAPER2_FAILURE_EVIDENCE=1' not in raw:
+                          selected.add(pid)
+                  except (OSError,ValueError):continue
+              # Descendants include sudo/native workers whose environment may be scrubbed.
+              while True:
+                  extra={pid for pid,parent in parents.items() if parent in selected}
+                  if extra<=selected:break
+                  selected|=extra
+              selected.discard(os.getpid())
+              return selected
+
+
+          def monitor(root, token, poll=.2, process_source=None, terminate=None):
+              root=Path(root);start(root);expired=False
+              while not (root.parent/'WATCHDOG_STOP').exists():
+                  try:require(root)
+                  except TimeoutError:
+                      if not expired:
+                          evidence=root.parent/'failure-upload';evidence.mkdir(parents=True,exist_ok=True)
+                          receipt=dict(reason='active aggregate 280-minute work limit',monotonic_ns=time.monotonic_ns())
+                          (root.parent/'WATCHDOG_EXPIRED.json').write_text(json.dumps(receipt))
+                          (evidence/'UNVERIFIED').write_text('UNVERIFIED: watchdog stopped this attempt; inspection only.\n')
+                          (evidence/'WATCHDOG_TIMEOUT.json').write_text(json.dumps(receipt))
+                          expired=True
+                      for pid in (process_source or tagged_processes)(token):
+                          if terminate:terminate(pid);continue
+                          try:os.kill(pid,signal.SIGKILL)
+                          except ProcessLookupError:pass
+                          except PermissionError:
+                              subprocess.run(['sudo','-n','kill','-KILL',str(pid)],check=False)
+                  time.sleep(poll)
+
+
+          def main():
+              p=argparse.ArgumentParser();p.add_argument('command',choices=('start','monitor','require','stop'))
+              p.add_argument('--root',type=Path,required=True);p.add_argument('--token',default='');p.add_argument('--cap',type=float,default=0)
+              a=p.parse_args()
+              if a.command=='start':start(a.root)
+              elif a.command=='require':require(a.root,a.cap)
+              elif a.command=='stop':(a.root.parent/'WATCHDOG_STOP').touch()
+              else:monitor(a.root,a.token)
+
+
+          if __name__=='__main__':main()
+          PAPER2_WATCHDOG
+          python3 "$RUNNER_TEMP/paper2-job-watchdog.py" start --root "$RUNNER_TEMP/paper2-production/control"
+          RUNNER_TRACKING_ID="" PAPER2_FAILURE_EVIDENCE=1 nohup python3 "$RUNNER_TEMP/paper2-job-watchdog.py" monitor --root "$RUNNER_TEMP/paper2-production/control" --token "$PAPER2_WORK_TOKEN" > "$RUNNER_TEMP/paper2-production/control/active-watchdog.log" 2>&1 < /dev/null &
+          python3 -c 'import json,shutil; from pathlib import Path; p=Path(__import__("os").environ["RUNNER_TEMP"])/"paper2-production/control/disk-cleanup.json"; p.write_text(json.dumps({"before_bytes":shutil.disk_usage(p.parent).free}))'
+          sudo rm -rf -- /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          python3 -c 'import json,shutil; from pathlib import Path; p=Path(__import__("os").environ["RUNNER_TEMP"])/"paper2-production/control/disk-cleanup.json"; d=json.loads(p.read_text()); d["after_bytes"]=shutil.disk_usage(p.parent).free; p.write_text(json.dumps(d)); print(json.dumps(d))'
+          df -B1 --output=source,size,used,avail,target "$RUNNER_TEMP" > "$RUNNER_TEMP/paper2-production/control/disk-job-start.txt"
+          cat "$RUNNER_TEMP/paper2-production/control/disk-job-start.txt"
+          echo "PYTHONPYCACHEPREFIX=$RUNNER_TEMP/paper2-pycache" >> "$GITHUB_ENV"
+          echo "G3_ROOT=$RUNNER_TEMP/paper2-production" >> "$GITHUB_ENV"
+          echo "G3_NATIVE=$RUNNER_TEMP/paper2-native" >> "$GITHUB_ENV"
+          echo "OQS_INSTALL_PATH=$RUNNER_TEMP/paper2-native/liboqs" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/paper2-native/openssl/lib:$RUNNER_TEMP/paper2-native/liboqs/lib" >> "$GITHUB_ENV"
+          echo "OPENSSL_MODULES=$RUNNER_TEMP/paper2-native/openssl/lib/ossl-modules" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Record initial disk and watchdog
+        run: |
+          python -m src.paper2.prototype.production record-disk --root "$G3_ROOT/control"
+          python -m src.paper2.prototype.runner --record-start "$G3_ROOT/control"
+      - name: Native build and unchanged conformance
+        timeout-minutes: 55
+        shell: bash
+        run: |
+          python -m src.paper2.prototype.work_budget require --root "$G3_ROOT/control" --cap 3300
+          python -m pip install --disable-pip-version-check cryptography==45.0.7
+          python -m src.paper2.prototype.export --verify-bundle .
+          python -m src.paper2.prototype.runner --record-host "$G3_ROOT/control"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake ninja-build perl
+          timeout --signal=TERM --kill-after=10s 40m python -m src.paper2.prototype.provision --stage build --root "$G3_NATIVE" --artifacts "$G3_ROOT/control" --execute || { tail -n 60 "$G3_ROOT/control/native-build.log"; exit 1; }
+          python -m src.paper2.prototype.work_budget require --root "$G3_ROOT/control" --cap 900
+          timeout --signal=TERM --kill-after=10s 15m python -m src.paper2.prototype.provision --stage conformance --root "$G3_NATIVE" --artifacts "$G3_ROOT/control" --execute
+      - name: Runner self-tests with visible failure evidence
+        shell: bash
+        run: python -m unittest discover -s tests/paper2 -p 'test_phase5a*.py' -v > "$G3_ROOT/control/local-tests.txt" 2>&1 || { tail -n 60 "$G3_ROOT/control/local-tests.txt"; exit 1; }
+      - name: Validate prior attempt and sealed follow-up authorization
+        shell: bash
+        run: |
+          if [ "$PURPOSE" = paper2-g3-rehearsal-v1 ]; then exit 0; fi
+          python -m src.paper2.prototype.remote_authorization --root "$G3_ROOT" --part "$PART" --attempt "$ATTEMPT" --mode "$MODE" --previous-run "$PREVIOUS_RUN" --aggregate-run "$AGGREGATE_RUN" --cells "$FOLLOWUP_CELLS"
+      - name: Fresh calibration, exact counts, budget and disk preflight
+        timeout-minutes: 80
+        shell: bash
+        run: |
+          python -m src.paper2.prototype.work_budget require --root "$G3_ROOT/control" --cap 4800
+          args=()
+          if [ -f "$G3_ROOT/authorization/previous.json" ]; then args+=(--previous "$G3_ROOT/authorization/previous.json"); fi
+          if [ -d "$G3_ROOT/authorization/aggregate" ]; then args+=(--aggregate "$G3_ROOT/authorization/aggregate"); fi
+          python -m src.paper2.prototype.production prepare --root "$G3_ROOT/control" --part "$PART" --attempt "$ATTEMPT" --mode "$MODE" --purpose "$PURPOSE" --cells "$FOLLOWUP_CELLS" "${args[@]}"
+      - name: Measure and seal slot 0
+        id: slot0
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 0
+      - name: Verified upload inventory 1
+        id: inventory_verified_1
+        if: success() && steps.slot0.outcome == 'success' && steps.slot0.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/0/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 1
+        id: seal_verified_1
+        if: success() && steps.slot0.outcome == 'success' && steps.slot0.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/0/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 0
+        id: upload0
+        if: success() && steps.slot0.outcome == 'success' && steps.slot0.outputs.present == 'true' && steps.inventory_verified_1.outcome == 'success' && steps.seal_verified_1.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-packet-${{ github.run_id }}-0
+          path: ${{ runner.temp }}/paper2-production/upload/0/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download immutable uploaded packet 0
+        if: steps.slot0.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.upload0.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/0/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 0
+        if: steps.slot0.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload0.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload0.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-0.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/0" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-0.zip"
+      - name: Measure and seal slot 1
+        id: slot1
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 1
+      - name: Verified upload inventory 2
+        id: inventory_verified_2
+        if: success() && steps.slot1.outcome == 'success' && steps.slot1.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/1/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 2
+        id: seal_verified_2
+        if: success() && steps.slot1.outcome == 'success' && steps.slot1.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/1/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 1
+        id: upload1
+        if: success() && steps.slot1.outcome == 'success' && steps.slot1.outputs.present == 'true' && steps.inventory_verified_2.outcome == 'success' && steps.seal_verified_2.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-packet-${{ github.run_id }}-1
+          path: ${{ runner.temp }}/paper2-production/upload/1/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download immutable uploaded packet 1
+        if: steps.slot1.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.upload1.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/1/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 1
+        if: steps.slot1.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload1.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload1.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-1.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/1" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-1.zip"
+      - name: Seal completed part index (no G3 verdict on ARM)
+        run: python -m src.paper2.prototype.production finalize --root "$G3_ROOT/control"
+      - name: Inventory completed control
+        id: control_inventory
+        if: success()
+        run: python -m src.paper2.prototype.runner --hash-artifacts "$G3_ROOT/control"
+      - name: Compress control and calibration without duplicating canonical sample objects
+        id: control_seal
+        if: success()
+        run: python -m src.paper2.prototype.production seal-control --root "$G3_ROOT/control"
+      - name: Verified upload inventory 3
+        id: inventory_verified_3
+        if: success() && steps.control_inventory.outcome == 'success' && steps.control_seal.outcome == 'success'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/control-upload/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 3
+        id: seal_verified_3
+        if: success() && steps.control_inventory.outcome == 'success' && steps.control_seal.outcome == 'success'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/control-upload/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload control and calibration only (canonical packets are referenced)
+        if: success() && steps.control_inventory.outcome == 'success' && steps.control_seal.outcome == 'success' && steps.inventory_verified_3.outcome == 'success' && steps.seal_verified_3.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-control-${{ github.run_id }}
+          path: ${{ runner.temp }}/paper2-production/control-upload/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Enforce unchanged 280-minute work budget after bulk transport
+        run: python -m src.paper2.prototype.production budget --root "$G3_ROOT/control"
+      - name: Preserve UNVERIFIED failure evidence only
+        id: failure_evidence
+        if: failure() || cancelled()
+        env:
+          PAPER2_FAILURE_EVIDENCE: '1'
+          EVIDENCE_0: ${{ runner.temp }}/paper2-production/upload/0/
+          EVIDENCE_1: ${{ runner.temp }}/paper2-production/upload/1/
+          EVIDENCE_2: ${{ runner.temp }}/paper2-production/control-upload/
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/paper2-failure-evidence"
+          echo "UNVERIFIED: failed attempt; inspection only; forbidden as replay or authorization input" > "$RUNNER_TEMP/paper2-failure-evidence/UNVERIFIED"
+          if [ -f src/paper2/prototype/failure_evidence.py ]; then
+            python -m src.paper2.prototype.failure_evidence --output "$RUNNER_TEMP/paper2-failure-evidence" "$EVIDENCE_0" "$EVIDENCE_1" "$EVIDENCE_2" "$RUNNER_TEMP/paper2-production/control" "$RUNNER_TEMP/paper2-production/working" "$RUNNER_TEMP/paper2-production/packet"
+          else
+            if [ -d "$RUNNER_TEMP/paper2-production/control" ]; then cp -al "$RUNNER_TEMP/paper2-production/control" "$RUNNER_TEMP/paper2-failure-evidence/early-control"; fi
+          fi
+          if [ -d "$RUNNER_TEMP/paper2-production/failure-upload" ]; then cp -a "$RUNNER_TEMP/paper2-production/failure-upload/." "$RUNNER_TEMP/paper2-failure-evidence/"; fi
+      - name: Upload UNVERIFIED failed attempt evidence
+        if: (failure() || cancelled()) && steps.failure_evidence.outcome == 'success'
+        env:
+          PAPER2_FAILURE_EVIDENCE: '1'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: failed-attempt-evidence-${{ github.run_id }}-${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/paper2-failure-evidence/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop aggregate monitor after evidence handling
+        if: always()
+        env:
+          PAPER2_FAILURE_EVIDENCE: '1'
+        run: touch "$RUNNER_TEMP/paper2-production/WATCHDOG_STOP"

@@ -31,6 +31,8 @@ def write_checksums(root):
 
 
 def verify_checksums(root, *, check_hashes=True):
+    from .input_trust import reject
+    reject(root)
     root = Path(root).resolve(); manifest = root/NAME
     if not manifest.is_file(): raise ValueError('missing artifact checksum inventory: '+NAME)
     seen = set()

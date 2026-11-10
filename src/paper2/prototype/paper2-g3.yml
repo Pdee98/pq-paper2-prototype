@@ -1,14 +1,51 @@
 name: Paper 2 G3 validation
+run-name: Paper2 G3 ${{ inputs.part }}/${{ inputs.mode }}/attempt-${{ inputs.attempt }} previous-${{ inputs.previous_run_id }} aggregate-${{ inputs.aggregate_run_id }} cells-${{ inputs.cells }}
 on:
   workflow_dispatch:
+    inputs:
+      part:
+        type: choice
+        options: [7X, 7M]
+        required: true
+      attempt:
+        type: choice
+        options: ['1', '2']
+        default: '1'
+      mode:
+        type: choice
+        options: [initial, followup]
+        default: initial
+      previous_run_id:
+        type: string
+        description: Failed first operational attempt (required for attempt 2)
+      aggregate_run_id:
+        type: string
+        description: Sealed INCONCLUSIVE gather authorizing D1 replicate 3
+      cells:
+        type: string
+        description: Follow-up global cell IDs only (comma separated)
 permissions:
   contents: read
+  actions: read
 jobs:
   g3:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 330
+    concurrency:
+      group: paper2-g3-${{ github.sha }}-${{ inputs.part }}-${{ inputs.mode }}-${{ inputs.aggregate_run_id }}
+      cancel-in-progress: false
     env:
+      PAPER2_WORK_TOKEN: ${{ github.run_id }}-${{ github.job }}
       PYTHONDONTWRITEBYTECODE: '1'
+      PAPER2_RUNNER_LABEL: ubuntu-24.04-arm
+      GH_TOKEN: ${{ github.token }}
+      PART: ${{ inputs.part }}
+      ATTEMPT: ${{ inputs.attempt }}
+      MODE: ${{ inputs.mode }}
+      PURPOSE: validation
+      PREVIOUS_RUN: ${{ inputs.previous_run_id }}
+      AGGREGATE_RUN: ${{ inputs.aggregate_run_id }}
+      FOLLOWUP_CELLS: ${{ inputs.cells }}
     steps:
       - name: Run 7 preparation gate (unconditional)
         shell: bash
@@ -18,60 +55,1254 @@ jobs:
       - name: Set runner-temp paths
         shell: bash
         run: |
+          mkdir -p "$RUNNER_TEMP/paper2-production/control"
+          cat > "$RUNNER_TEMP/paper2-job-watchdog.py" <<'PAPER2_WATCHDOG'
+          """Standalone Linux job watchdog; embedded verbatim before checkout in ARM jobs.
+
+          It kills tagged work processes, including Action processes, but exempts failure
+          evidence steps. No repository imports: system Python can start it in step one.
+          """
+          import argparse
+          import json
+          import os
+          from pathlib import Path
+          import signal
+          import subprocess
+          import time
+
+          LIMIT = 280*60
+
+
+          def start(root, seconds=LIMIT):
+              root=Path(root);root.mkdir(parents=True,exist_ok=True)
+              path=root/'watchdog.json'
+              if not path.exists():
+                  path.write_text(json.dumps(dict(monotonic_ns=time.monotonic_ns(),work_seconds=seconds,work_minutes=280)))
+              return json.loads(path.read_text())
+
+
+          def require(root, cap=0):
+              root=Path(root);record=json.loads((root/'watchdog.json').read_text())
+              remaining=record.get('work_seconds',LIMIT)-(time.monotonic_ns()-record['monotonic_ns'])/1e9
+              if (root.parent/'WATCHDOG_EXPIRED.json').exists() or remaining<=0 or cap>remaining:
+                  raise TimeoutError('stage cap exceeds remaining 280-minute work budget')
+              return remaining
+
+
+          def tagged_processes(token):
+              selected=set();parents={}
+              for path in Path('/proc').iterdir():
+                  if not path.name.isdigit():continue
+                  try:
+                      pid=int(path.name);raw=(path/'environ').read_bytes().split(b'\0')
+                      parents[pid]=int((path/'stat').read_text().rsplit(')',1)[1].split()[1])
+                      if b'PAPER2_WORK_TOKEN='+token.encode() in raw and b'PAPER2_FAILURE_EVIDENCE=1' not in raw:
+                          selected.add(pid)
+                  except (OSError,ValueError):continue
+              # Descendants include sudo/native workers whose environment may be scrubbed.
+              while True:
+                  extra={pid for pid,parent in parents.items() if parent in selected}
+                  if extra<=selected:break
+                  selected|=extra
+              selected.discard(os.getpid())
+              return selected
+
+
+          def monitor(root, token, poll=.2, process_source=None, terminate=None):
+              root=Path(root);start(root);expired=False
+              while not (root.parent/'WATCHDOG_STOP').exists():
+                  try:require(root)
+                  except TimeoutError:
+                      if not expired:
+                          evidence=root.parent/'failure-upload';evidence.mkdir(parents=True,exist_ok=True)
+                          receipt=dict(reason='active aggregate 280-minute work limit',monotonic_ns=time.monotonic_ns())
+                          (root.parent/'WATCHDOG_EXPIRED.json').write_text(json.dumps(receipt))
+                          (evidence/'UNVERIFIED').write_text('UNVERIFIED: watchdog stopped this attempt; inspection only.\n')
+                          (evidence/'WATCHDOG_TIMEOUT.json').write_text(json.dumps(receipt))
+                          expired=True
+                      for pid in (process_source or tagged_processes)(token):
+                          if terminate:terminate(pid);continue
+                          try:os.kill(pid,signal.SIGKILL)
+                          except ProcessLookupError:pass
+                          except PermissionError:
+                              subprocess.run(['sudo','-n','kill','-KILL',str(pid)],check=False)
+                  time.sleep(poll)
+
+
+          def main():
+              p=argparse.ArgumentParser();p.add_argument('command',choices=('start','monitor','require','stop'))
+              p.add_argument('--root',type=Path,required=True);p.add_argument('--token',default='');p.add_argument('--cap',type=float,default=0)
+              a=p.parse_args()
+              if a.command=='start':start(a.root)
+              elif a.command=='require':require(a.root,a.cap)
+              elif a.command=='stop':(a.root.parent/'WATCHDOG_STOP').touch()
+              else:monitor(a.root,a.token)
+
+
+          if __name__=='__main__':main()
+          PAPER2_WATCHDOG
+          python3 "$RUNNER_TEMP/paper2-job-watchdog.py" start --root "$RUNNER_TEMP/paper2-production/control"
+          RUNNER_TRACKING_ID="" PAPER2_FAILURE_EVIDENCE=1 nohup python3 "$RUNNER_TEMP/paper2-job-watchdog.py" monitor --root "$RUNNER_TEMP/paper2-production/control" --token "$PAPER2_WORK_TOKEN" > "$RUNNER_TEMP/paper2-production/control/active-watchdog.log" 2>&1 < /dev/null &
+          python3 -c 'import json,shutil; from pathlib import Path; p=Path(__import__("os").environ["RUNNER_TEMP"])/"paper2-production/control/disk-cleanup.json"; p.write_text(json.dumps({"before_bytes":shutil.disk_usage(p.parent).free}))'
+          sudo rm -rf -- /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          python3 -c 'import json,shutil; from pathlib import Path; p=Path(__import__("os").environ["RUNNER_TEMP"])/"paper2-production/control/disk-cleanup.json"; d=json.loads(p.read_text()); d["after_bytes"]=shutil.disk_usage(p.parent).free; p.write_text(json.dumps(d)); print(json.dumps(d))'
+          df -B1 --output=source,size,used,avail,target "$RUNNER_TEMP" > "$RUNNER_TEMP/paper2-production/control/disk-job-start.txt"
+          cat "$RUNNER_TEMP/paper2-production/control/disk-job-start.txt"
           echo "PYTHONPYCACHEPREFIX=$RUNNER_TEMP/paper2-pycache" >> "$GITHUB_ENV"
-          echo "G3_ARTIFACTS=$RUNNER_TEMP/paper2-g3-artifacts" >> "$GITHUB_ENV"
+          echo "G3_ROOT=$RUNNER_TEMP/paper2-production" >> "$GITHUB_ENV"
+          echo "G3_NATIVE=$RUNNER_TEMP/paper2-native" >> "$GITHUB_ENV"
+          echo "OQS_INSTALL_PATH=$RUNNER_TEMP/paper2-native/liboqs" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/paper2-native/openssl/lib:$RUNNER_TEMP/paper2-native/liboqs/lib" >> "$GITHUB_ENV"
+          echo "OPENSSL_MODULES=$RUNNER_TEMP/paper2-native/openssl/lib/ossl-modules" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: '3.13'
-      - name: Bounded build, conformance, calibration and prototype measurements
+      - name: Record initial disk and watchdog
+        run: |
+          python -m src.paper2.prototype.production record-disk --root "$G3_ROOT/control"
+          python -m src.paper2.prototype.runner --record-start "$G3_ROOT/control"
+      - name: Native build and unchanged conformance
+        timeout-minutes: 55
         shell: bash
         run: |
-          mkdir -p "$G3_ARTIFACTS"
-          export G3_NATIVE="$RUNNER_TEMP/paper2-native"
-          export OQS_INSTALL_PATH="$G3_NATIVE/liboqs"
-          export LD_LIBRARY_PATH="$G3_NATIVE/openssl/lib:$G3_NATIVE/liboqs/lib:${LD_LIBRARY_PATH:-}"
-          export OPENSSL_MODULES="$G3_NATIVE/openssl/lib/ossl-modules"
-          timeout --signal=TERM --kill-after=10s 280m bash -euo pipefail <<'G3'
-          python -m src.paper2.prototype.runner --require-validation-caps
-          python -m src.paper2.prototype.runner --record-start "$G3_ARTIFACTS"
-          cp BUNDLE_MANIFEST.json BUNDLE_MANIFEST.sha256 "$G3_ARTIFACTS/"
-          cp research/paper2/phase5/RUNTIME_PLAN.md src/paper2/prototype/source_pins.json "$G3_ARTIFACTS/"
-          timeout --signal=TERM --kill-after=10s 40m bash -euo pipefail <<'BUILD' || { tail -n 60 "$G3_ARTIFACTS/native-build.log"; exit 1; }
+          python -m src.paper2.prototype.work_budget require --root "$G3_ROOT/control" --cap 3300
           python -m pip install --disable-pip-version-check cryptography==45.0.7
-          python -m src.paper2.prototype.runner --record-host "$G3_ARTIFACTS"
           python -m src.paper2.prototype.export --verify-bundle .
+          python -m src.paper2.prototype.runner --record-host "$G3_ROOT/control"
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential cmake ninja-build perl
-          python -m src.paper2.prototype.provision --stage build --root "$G3_NATIVE" --artifacts "$G3_ARTIFACTS" --execute
-          BUILD
-          timeout --signal=TERM --kill-after=10s 15m python -m src.paper2.prototype.provision --stage conformance --root "$G3_NATIVE" --artifacts "$G3_ARTIFACTS" --execute
-          python -m unittest discover -s tests/paper2 -p 'test_phase5a*.py' -v > "$G3_ARTIFACTS/local-tests.txt" 2>&1 || { tail -n 60 "$G3_ARTIFACTS/local-tests.txt"; exit 1; }
-          python -m src.paper2.prototype.runner --output "$G3_ARTIFACTS" --execute
-          G3
-      - name: Audit public corpus before any upload
-        id: corpus_audit
-        if: always()
-        run: python -m src.paper2.prototype.public_corpus "$G3_ARTIFACTS"
-      - name: Hash all artifacts, including partial failures
-        id: artifact_hashes
-        if: always()
-        timeout-minutes: 2
-        run: python -m src.paper2.prototype.runner --hash-artifacts "$G3_ARTIFACTS"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always() && steps.corpus_audit.outcome == 'success' && steps.artifact_hashes.outcome == 'success'
-        timeout-minutes: 8
+          timeout --signal=TERM --kill-after=10s 40m python -m src.paper2.prototype.provision --stage build --root "$G3_NATIVE" --artifacts "$G3_ROOT/control" --execute || { tail -n 60 "$G3_ROOT/control/native-build.log"; exit 1; }
+          python -m src.paper2.prototype.work_budget require --root "$G3_ROOT/control" --cap 900
+          timeout --signal=TERM --kill-after=10s 15m python -m src.paper2.prototype.provision --stage conformance --root "$G3_NATIVE" --artifacts "$G3_ROOT/control" --execute
+      - name: Runner self-tests with visible failure evidence
+        shell: bash
+        run: python -m unittest discover -s tests/paper2 -p 'test_phase5a*.py' -v > "$G3_ROOT/control/local-tests.txt" 2>&1 || { tail -n 60 "$G3_ROOT/control/local-tests.txt"; exit 1; }
+      - name: Validate prior attempt and sealed follow-up authorization
+        shell: bash
+        run: |
+          if [ "$PURPOSE" = paper2-g3-rehearsal-v1 ]; then exit 0; fi
+          python -m src.paper2.prototype.remote_authorization --root "$G3_ROOT" --part "$PART" --attempt "$ATTEMPT" --mode "$MODE" --previous-run "$PREVIOUS_RUN" --aggregate-run "$AGGREGATE_RUN" --cells "$FOLLOWUP_CELLS"
+      - name: Fresh calibration, exact counts, budget and disk preflight
+        timeout-minutes: 80
+        shell: bash
+        run: |
+          python -m src.paper2.prototype.work_budget require --root "$G3_ROOT/control" --cap 4800
+          args=()
+          if [ -f "$G3_ROOT/authorization/previous.json" ]; then args+=(--previous "$G3_ROOT/authorization/previous.json"); fi
+          if [ -d "$G3_ROOT/authorization/aggregate" ]; then args+=(--aggregate "$G3_ROOT/authorization/aggregate"); fi
+          python -m src.paper2.prototype.production prepare --root "$G3_ROOT/control" --part "$PART" --attempt "$ATTEMPT" --mode "$MODE" --purpose "$PURPOSE" --cells "$FOLLOWUP_CELLS" "${args[@]}"
+      - name: Measure and seal slot 0
+        id: slot0
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 0
+      - name: Verified upload inventory 1
+        id: inventory_verified_1
+        if: success() && steps.slot0.outcome == 'success' && steps.slot0.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/0/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 1
+        id: seal_verified_1
+        if: success() && steps.slot0.outcome == 'success' && steps.slot0.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/0/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 0
+        id: upload0
+        if: success() && steps.slot0.outcome == 'success' && steps.slot0.outputs.present == 'true' && steps.inventory_verified_1.outcome == 'success' && steps.seal_verified_1.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: paper2-g3-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/paper2-g3-artifacts/
+          name: paper2-g3-packet-${{ github.run_id }}-0
+          path: ${{ runner.temp }}/paper2-production/upload/0/
+          compression-level: 0
           if-no-files-found: error
           retention-days: 30
-      - name: Upload audited public replay inputs
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always() && steps.corpus_audit.outcome == 'success' && steps.artifact_hashes.outcome == 'success'
-        timeout-minutes: 8
+      - name: Download immutable uploaded packet 0
+        if: steps.slot0.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
-          name: paper2-g3-replay-inputs-${{ github.run_id }}
-          path: ${{ runner.temp }}/paper2-g3-artifacts/replay-inputs/
-          if-no-files-found: warn
+          artifact-ids: ${{ steps.upload0.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/0/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 0
+        if: steps.slot0.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload0.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload0.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-0.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/0" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-0.zip"
+      - name: Measure and seal slot 1
+        id: slot1
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 1
+      - name: Verified upload inventory 2
+        id: inventory_verified_2
+        if: success() && steps.slot1.outcome == 'success' && steps.slot1.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/1/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 2
+        id: seal_verified_2
+        if: success() && steps.slot1.outcome == 'success' && steps.slot1.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/1/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 1
+        id: upload1
+        if: success() && steps.slot1.outcome == 'success' && steps.slot1.outputs.present == 'true' && steps.inventory_verified_2.outcome == 'success' && steps.seal_verified_2.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-packet-${{ github.run_id }}-1
+          path: ${{ runner.temp }}/paper2-production/upload/1/
+          compression-level: 0
+          if-no-files-found: error
           retention-days: 30
+      - name: Download immutable uploaded packet 1
+        if: steps.slot1.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.upload1.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/1/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 1
+        if: steps.slot1.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload1.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload1.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-1.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/1" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-1.zip"
+      - name: Measure and seal slot 2
+        id: slot2
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 2
+      - name: Verified upload inventory 3
+        id: inventory_verified_3
+        if: success() && steps.slot2.outcome == 'success' && steps.slot2.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/2/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 3
+        id: seal_verified_3
+        if: success() && steps.slot2.outcome == 'success' && steps.slot2.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/2/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 2
+        id: upload2
+        if: success() && steps.slot2.outcome == 'success' && steps.slot2.outputs.present == 'true' && steps.inventory_verified_3.outcome == 'success' && steps.seal_verified_3.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-packet-${{ github.run_id }}-2
+          path: ${{ runner.temp }}/paper2-production/upload/2/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download immutable uploaded packet 2
+        if: steps.slot2.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.upload2.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/2/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 2
+        if: steps.slot2.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload2.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload2.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-2.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/2" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-2.zip"
+      - name: Measure and seal slot 3
+        id: slot3
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 3
+      - name: Verified upload inventory 4
+        id: inventory_verified_4
+        if: success() && steps.slot3.outcome == 'success' && steps.slot3.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/3/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 4
+        id: seal_verified_4
+        if: success() && steps.slot3.outcome == 'success' && steps.slot3.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/3/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 3
+        id: upload3
+        if: success() && steps.slot3.outcome == 'success' && steps.slot3.outputs.present == 'true' && steps.inventory_verified_4.outcome == 'success' && steps.seal_verified_4.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-packet-${{ github.run_id }}-3
+          path: ${{ runner.temp }}/paper2-production/upload/3/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download immutable uploaded packet 3
+        if: steps.slot3.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.upload3.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/3/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 3
+        if: steps.slot3.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload3.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload3.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-3.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/3" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-3.zip"
+      - name: Measure and seal slot 4
+        id: slot4
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 4
+      - name: Verified upload inventory 5
+        id: inventory_verified_5
+        if: success() && steps.slot4.outcome == 'success' && steps.slot4.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/4/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 5
+        id: seal_verified_5
+        if: success() && steps.slot4.outcome == 'success' && steps.slot4.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/4/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 4
+        id: upload4
+        if: success() && steps.slot4.outcome == 'success' && steps.slot4.outputs.present == 'true' && steps.inventory_verified_5.outcome == 'success' && steps.seal_verified_5.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-packet-${{ github.run_id }}-4
+          path: ${{ runner.temp }}/paper2-production/upload/4/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download immutable uploaded packet 4
+        if: steps.slot4.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.upload4.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/4/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 4
+        if: steps.slot4.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload4.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload4.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-4.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/4" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-4.zip"
+      - name: Measure and seal slot 5
+        id: slot5
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 5
+      - name: Verified upload inventory 6
+        id: inventory_verified_6
+        if: success() && steps.slot5.outcome == 'success' && steps.slot5.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/5/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 6
+        id: seal_verified_6
+        if: success() && steps.slot5.outcome == 'success' && steps.slot5.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/5/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 5
+        id: upload5
+        if: success() && steps.slot5.outcome == 'success' && steps.slot5.outputs.present == 'true' && steps.inventory_verified_6.outcome == 'success' && steps.seal_verified_6.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-packet-${{ github.run_id }}-5
+          path: ${{ runner.temp }}/paper2-production/upload/5/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download immutable uploaded packet 5
+        if: steps.slot5.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.upload5.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/5/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 5
+        if: steps.slot5.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload5.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload5.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-5.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/5" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-5.zip"
+      - name: Measure and seal slot 6
+        id: slot6
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 6
+      - name: Verified upload inventory 7
+        id: inventory_verified_7
+        if: success() && steps.slot6.outcome == 'success' && steps.slot6.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/6/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 7
+        id: seal_verified_7
+        if: success() && steps.slot6.outcome == 'success' && steps.slot6.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/6/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 6
+        id: upload6
+        if: success() && steps.slot6.outcome == 'success' && steps.slot6.outputs.present == 'true' && steps.inventory_verified_7.outcome == 'success' && steps.seal_verified_7.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-packet-${{ github.run_id }}-6
+          path: ${{ runner.temp }}/paper2-production/upload/6/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download immutable uploaded packet 6
+        if: steps.slot6.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.upload6.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/6/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 6
+        if: steps.slot6.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload6.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload6.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-6.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/6" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-6.zip"
+      - name: Measure and seal slot 7
+        id: slot7
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 7
+      - name: Verified upload inventory 8
+        id: inventory_verified_8
+        if: success() && steps.slot7.outcome == 'success' && steps.slot7.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/7/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 8
+        id: seal_verified_8
+        if: success() && steps.slot7.outcome == 'success' && steps.slot7.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/7/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 7
+        id: upload7
+        if: success() && steps.slot7.outcome == 'success' && steps.slot7.outputs.present == 'true' && steps.inventory_verified_8.outcome == 'success' && steps.seal_verified_8.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-packet-${{ github.run_id }}-7
+          path: ${{ runner.temp }}/paper2-production/upload/7/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download immutable uploaded packet 7
+        if: steps.slot7.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.upload7.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/7/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 7
+        if: steps.slot7.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload7.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload7.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-7.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/7" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-7.zip"
+      - name: Measure and seal slot 8
+        id: slot8
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 8
+      - name: Verified upload inventory 9
+        id: inventory_verified_9
+        if: success() && steps.slot8.outcome == 'success' && steps.slot8.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/8/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 9
+        id: seal_verified_9
+        if: success() && steps.slot8.outcome == 'success' && steps.slot8.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/8/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 8
+        id: upload8
+        if: success() && steps.slot8.outcome == 'success' && steps.slot8.outputs.present == 'true' && steps.inventory_verified_9.outcome == 'success' && steps.seal_verified_9.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-packet-${{ github.run_id }}-8
+          path: ${{ runner.temp }}/paper2-production/upload/8/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download immutable uploaded packet 8
+        if: steps.slot8.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.upload8.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/8/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 8
+        if: steps.slot8.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload8.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload8.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-8.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/8" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-8.zip"
+      - name: Measure and seal slot 9
+        id: slot9
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 9
+      - name: Verified upload inventory 10
+        id: inventory_verified_10
+        if: success() && steps.slot9.outcome == 'success' && steps.slot9.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/9/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 10
+        id: seal_verified_10
+        if: success() && steps.slot9.outcome == 'success' && steps.slot9.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/9/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 9
+        id: upload9
+        if: success() && steps.slot9.outcome == 'success' && steps.slot9.outputs.present == 'true' && steps.inventory_verified_10.outcome == 'success' && steps.seal_verified_10.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-packet-${{ github.run_id }}-9
+          path: ${{ runner.temp }}/paper2-production/upload/9/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download immutable uploaded packet 9
+        if: steps.slot9.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.upload9.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/9/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 9
+        if: steps.slot9.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload9.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload9.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-9.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/9" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-9.zip"
+      - name: Measure and seal slot 10
+        id: slot10
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 10
+      - name: Verified upload inventory 11
+        id: inventory_verified_11
+        if: success() && steps.slot10.outcome == 'success' && steps.slot10.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/10/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 11
+        id: seal_verified_11
+        if: success() && steps.slot10.outcome == 'success' && steps.slot10.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/10/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 10
+        id: upload10
+        if: success() && steps.slot10.outcome == 'success' && steps.slot10.outputs.present == 'true' && steps.inventory_verified_11.outcome == 'success' && steps.seal_verified_11.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-packet-${{ github.run_id }}-10
+          path: ${{ runner.temp }}/paper2-production/upload/10/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download immutable uploaded packet 10
+        if: steps.slot10.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.upload10.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/10/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 10
+        if: steps.slot10.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload10.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload10.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-10.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/10" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-10.zip"
+      - name: Measure and seal slot 11
+        id: slot11
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 11
+      - name: Verified upload inventory 12
+        id: inventory_verified_12
+        if: success() && steps.slot11.outcome == 'success' && steps.slot11.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/11/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 12
+        id: seal_verified_12
+        if: success() && steps.slot11.outcome == 'success' && steps.slot11.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/11/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 11
+        id: upload11
+        if: success() && steps.slot11.outcome == 'success' && steps.slot11.outputs.present == 'true' && steps.inventory_verified_12.outcome == 'success' && steps.seal_verified_12.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-packet-${{ github.run_id }}-11
+          path: ${{ runner.temp }}/paper2-production/upload/11/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download immutable uploaded packet 11
+        if: steps.slot11.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.upload11.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/11/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 11
+        if: steps.slot11.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload11.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload11.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-11.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/11" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-11.zip"
+      - name: Measure and seal slot 12
+        id: slot12
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 12
+      - name: Verified upload inventory 13
+        id: inventory_verified_13
+        if: success() && steps.slot12.outcome == 'success' && steps.slot12.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/12/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 13
+        id: seal_verified_13
+        if: success() && steps.slot12.outcome == 'success' && steps.slot12.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/12/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 12
+        id: upload12
+        if: success() && steps.slot12.outcome == 'success' && steps.slot12.outputs.present == 'true' && steps.inventory_verified_13.outcome == 'success' && steps.seal_verified_13.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-packet-${{ github.run_id }}-12
+          path: ${{ runner.temp }}/paper2-production/upload/12/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download immutable uploaded packet 12
+        if: steps.slot12.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.upload12.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/12/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 12
+        if: steps.slot12.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload12.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload12.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-12.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/12" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-12.zip"
+      - name: Measure and seal slot 13
+        id: slot13
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 13
+      - name: Verified upload inventory 14
+        id: inventory_verified_14
+        if: success() && steps.slot13.outcome == 'success' && steps.slot13.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/13/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 14
+        id: seal_verified_14
+        if: success() && steps.slot13.outcome == 'success' && steps.slot13.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/13/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 13
+        id: upload13
+        if: success() && steps.slot13.outcome == 'success' && steps.slot13.outputs.present == 'true' && steps.inventory_verified_14.outcome == 'success' && steps.seal_verified_14.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-packet-${{ github.run_id }}-13
+          path: ${{ runner.temp }}/paper2-production/upload/13/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download immutable uploaded packet 13
+        if: steps.slot13.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.upload13.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/13/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 13
+        if: steps.slot13.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload13.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload13.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-13.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/13" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-13.zip"
+      - name: Measure and seal slot 14
+        id: slot14
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 14
+      - name: Verified upload inventory 15
+        id: inventory_verified_15
+        if: success() && steps.slot14.outcome == 'success' && steps.slot14.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/14/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 15
+        id: seal_verified_15
+        if: success() && steps.slot14.outcome == 'success' && steps.slot14.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/14/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 14
+        id: upload14
+        if: success() && steps.slot14.outcome == 'success' && steps.slot14.outputs.present == 'true' && steps.inventory_verified_15.outcome == 'success' && steps.seal_verified_15.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-packet-${{ github.run_id }}-14
+          path: ${{ runner.temp }}/paper2-production/upload/14/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download immutable uploaded packet 14
+        if: steps.slot14.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.upload14.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/14/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 14
+        if: steps.slot14.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload14.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload14.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-14.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/14" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-14.zip"
+      - name: Measure and seal slot 15
+        id: slot15
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 15
+      - name: Verified upload inventory 16
+        id: inventory_verified_16
+        if: success() && steps.slot15.outcome == 'success' && steps.slot15.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/15/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 16
+        id: seal_verified_16
+        if: success() && steps.slot15.outcome == 'success' && steps.slot15.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/15/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 15
+        id: upload15
+        if: success() && steps.slot15.outcome == 'success' && steps.slot15.outputs.present == 'true' && steps.inventory_verified_16.outcome == 'success' && steps.seal_verified_16.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-packet-${{ github.run_id }}-15
+          path: ${{ runner.temp }}/paper2-production/upload/15/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download immutable uploaded packet 15
+        if: steps.slot15.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.upload15.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/15/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 15
+        if: steps.slot15.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload15.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload15.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-15.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/15" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-15.zip"
+      - name: Measure and seal slot 16
+        id: slot16
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 16
+      - name: Verified upload inventory 17
+        id: inventory_verified_17
+        if: success() && steps.slot16.outcome == 'success' && steps.slot16.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/16/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 17
+        id: seal_verified_17
+        if: success() && steps.slot16.outcome == 'success' && steps.slot16.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/16/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 16
+        id: upload16
+        if: success() && steps.slot16.outcome == 'success' && steps.slot16.outputs.present == 'true' && steps.inventory_verified_17.outcome == 'success' && steps.seal_verified_17.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-packet-${{ github.run_id }}-16
+          path: ${{ runner.temp }}/paper2-production/upload/16/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download immutable uploaded packet 16
+        if: steps.slot16.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.upload16.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/16/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 16
+        if: steps.slot16.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload16.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload16.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-16.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/16" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-16.zip"
+      - name: Measure and seal slot 17
+        id: slot17
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 17
+      - name: Verified upload inventory 18
+        id: inventory_verified_18
+        if: success() && steps.slot17.outcome == 'success' && steps.slot17.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/17/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 18
+        id: seal_verified_18
+        if: success() && steps.slot17.outcome == 'success' && steps.slot17.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/17/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 17
+        id: upload17
+        if: success() && steps.slot17.outcome == 'success' && steps.slot17.outputs.present == 'true' && steps.inventory_verified_18.outcome == 'success' && steps.seal_verified_18.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-packet-${{ github.run_id }}-17
+          path: ${{ runner.temp }}/paper2-production/upload/17/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download immutable uploaded packet 17
+        if: steps.slot17.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.upload17.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/17/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 17
+        if: steps.slot17.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload17.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload17.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-17.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/17" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-17.zip"
+      - name: Measure and seal slot 18
+        id: slot18
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 18
+      - name: Verified upload inventory 19
+        id: inventory_verified_19
+        if: success() && steps.slot18.outcome == 'success' && steps.slot18.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/18/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 19
+        id: seal_verified_19
+        if: success() && steps.slot18.outcome == 'success' && steps.slot18.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/18/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 18
+        id: upload18
+        if: success() && steps.slot18.outcome == 'success' && steps.slot18.outputs.present == 'true' && steps.inventory_verified_19.outcome == 'success' && steps.seal_verified_19.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-packet-${{ github.run_id }}-18
+          path: ${{ runner.temp }}/paper2-production/upload/18/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download immutable uploaded packet 18
+        if: steps.slot18.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.upload18.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/18/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 18
+        if: steps.slot18.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload18.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload18.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-18.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/18" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-18.zip"
+      - name: Measure and seal slot 19
+        id: slot19
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 19
+      - name: Verified upload inventory 20
+        id: inventory_verified_20
+        if: success() && steps.slot19.outcome == 'success' && steps.slot19.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/19/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 20
+        id: seal_verified_20
+        if: success() && steps.slot19.outcome == 'success' && steps.slot19.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/19/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 19
+        id: upload19
+        if: success() && steps.slot19.outcome == 'success' && steps.slot19.outputs.present == 'true' && steps.inventory_verified_20.outcome == 'success' && steps.seal_verified_20.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-packet-${{ github.run_id }}-19
+          path: ${{ runner.temp }}/paper2-production/upload/19/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download immutable uploaded packet 19
+        if: steps.slot19.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.upload19.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/19/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 19
+        if: steps.slot19.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload19.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload19.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-19.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/19" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-19.zip"
+      - name: Measure and seal slot 20
+        id: slot20
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 20
+      - name: Verified upload inventory 21
+        id: inventory_verified_21
+        if: success() && steps.slot20.outcome == 'success' && steps.slot20.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/20/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 21
+        id: seal_verified_21
+        if: success() && steps.slot20.outcome == 'success' && steps.slot20.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/20/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 20
+        id: upload20
+        if: success() && steps.slot20.outcome == 'success' && steps.slot20.outputs.present == 'true' && steps.inventory_verified_21.outcome == 'success' && steps.seal_verified_21.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-packet-${{ github.run_id }}-20
+          path: ${{ runner.temp }}/paper2-production/upload/20/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download immutable uploaded packet 20
+        if: steps.slot20.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.upload20.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/20/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 20
+        if: steps.slot20.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload20.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload20.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-20.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/20" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-20.zip"
+      - name: Measure and seal slot 21
+        id: slot21
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 21
+      - name: Verified upload inventory 22
+        id: inventory_verified_22
+        if: success() && steps.slot21.outcome == 'success' && steps.slot21.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/21/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 22
+        id: seal_verified_22
+        if: success() && steps.slot21.outcome == 'success' && steps.slot21.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/21/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 21
+        id: upload21
+        if: success() && steps.slot21.outcome == 'success' && steps.slot21.outputs.present == 'true' && steps.inventory_verified_22.outcome == 'success' && steps.seal_verified_22.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-packet-${{ github.run_id }}-21
+          path: ${{ runner.temp }}/paper2-production/upload/21/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download immutable uploaded packet 21
+        if: steps.slot21.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.upload21.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/21/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 21
+        if: steps.slot21.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload21.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload21.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-21.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/21" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-21.zip"
+      - name: Measure and seal slot 22
+        id: slot22
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 22
+      - name: Verified upload inventory 23
+        id: inventory_verified_23
+        if: success() && steps.slot22.outcome == 'success' && steps.slot22.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/22/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 23
+        id: seal_verified_23
+        if: success() && steps.slot22.outcome == 'success' && steps.slot22.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/22/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 22
+        id: upload22
+        if: success() && steps.slot22.outcome == 'success' && steps.slot22.outputs.present == 'true' && steps.inventory_verified_23.outcome == 'success' && steps.seal_verified_23.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-packet-${{ github.run_id }}-22
+          path: ${{ runner.temp }}/paper2-production/upload/22/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download immutable uploaded packet 22
+        if: steps.slot22.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.upload22.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/22/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 22
+        if: steps.slot22.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload22.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload22.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-22.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/22" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-22.zip"
+      - name: Measure and seal slot 23
+        id: slot23
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 23
+      - name: Verified upload inventory 24
+        id: inventory_verified_24
+        if: success() && steps.slot23.outcome == 'success' && steps.slot23.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/23/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 24
+        id: seal_verified_24
+        if: success() && steps.slot23.outcome == 'success' && steps.slot23.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/23/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 23
+        id: upload23
+        if: success() && steps.slot23.outcome == 'success' && steps.slot23.outputs.present == 'true' && steps.inventory_verified_24.outcome == 'success' && steps.seal_verified_24.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-packet-${{ github.run_id }}-23
+          path: ${{ runner.temp }}/paper2-production/upload/23/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download immutable uploaded packet 23
+        if: steps.slot23.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.upload23.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/23/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 23
+        if: steps.slot23.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload23.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload23.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-23.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/23" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-23.zip"
+      - name: Measure and seal slot 24
+        id: slot24
+        run: python -m src.paper2.prototype.production run --root "$G3_ROOT/control" --slot 24
+      - name: Verified upload inventory 25
+        id: inventory_verified_25
+        if: success() && steps.slot24.outcome == 'success' && steps.slot24.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/24/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 25
+        id: seal_verified_25
+        if: success() && steps.slot24.outcome == 'success' && steps.slot24.outputs.present == 'true'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/upload/24/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload canonical packet 24
+        id: upload24
+        if: success() && steps.slot24.outcome == 'success' && steps.slot24.outputs.present == 'true' && steps.inventory_verified_25.outcome == 'success' && steps.seal_verified_25.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-packet-${{ github.run_id }}-24
+          path: ${{ runner.temp }}/paper2-production/upload/24/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download immutable uploaded packet 24
+        if: steps.slot24.outputs.present == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ steps.upload24.outputs.artifact-id }}
+          path: ${{ runner.temp }}/paper2-production/verified/24/
+          merge-multiple: true
+      - name: Verify uploaded ZIP digest, contents and raw round-trip; release raw slot 24
+        if: steps.slot24.outputs.present == 'true'
+        env:
+          ARTIFACT_ID: ${{ steps.upload24.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload24.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$G3_ROOT/verified-24.zip"
+          python -m src.paper2.prototype.production ack --root "$G3_ROOT/control" --downloaded "$G3_ROOT/verified/24" --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST" --uploaded-zip "$G3_ROOT/verified-24.zip"
+      - name: Seal completed part index (no G3 verdict on ARM)
+        run: python -m src.paper2.prototype.production finalize --root "$G3_ROOT/control"
+      - name: Inventory completed control
+        id: control_inventory
+        if: success()
+        run: python -m src.paper2.prototype.runner --hash-artifacts "$G3_ROOT/control"
+      - name: Compress control and calibration without duplicating canonical sample objects
+        id: control_seal
+        if: success()
+        run: python -m src.paper2.prototype.production seal-control --root "$G3_ROOT/control"
+      - name: Verified upload inventory 26
+        id: inventory_verified_26
+        if: success() && steps.control_inventory.outcome == 'success' && steps.control_seal.outcome == 'success'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/control-upload/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 26
+        id: seal_verified_26
+        if: success() && steps.control_inventory.outcome == 'success' && steps.control_seal.outcome == 'success'
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/paper2-production/control-upload/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
+      - name: Upload control and calibration only (canonical packets are referenced)
+        if: success() && steps.control_inventory.outcome == 'success' && steps.control_seal.outcome == 'success' && steps.inventory_verified_26.outcome == 'success' && steps.seal_verified_26.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: paper2-g3-control-${{ github.run_id }}
+          path: ${{ runner.temp }}/paper2-production/control-upload/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Enforce unchanged 280-minute work budget after bulk transport
+        run: python -m src.paper2.prototype.production budget --root "$G3_ROOT/control"
+      - name: Preserve UNVERIFIED failure evidence only
+        id: failure_evidence
+        if: failure() || cancelled()
+        env:
+          PAPER2_FAILURE_EVIDENCE: '1'
+          EVIDENCE_0: ${{ runner.temp }}/paper2-production/upload/0/
+          EVIDENCE_1: ${{ runner.temp }}/paper2-production/upload/1/
+          EVIDENCE_2: ${{ runner.temp }}/paper2-production/upload/2/
+          EVIDENCE_3: ${{ runner.temp }}/paper2-production/upload/3/
+          EVIDENCE_4: ${{ runner.temp }}/paper2-production/upload/4/
+          EVIDENCE_5: ${{ runner.temp }}/paper2-production/upload/5/
+          EVIDENCE_6: ${{ runner.temp }}/paper2-production/upload/6/
+          EVIDENCE_7: ${{ runner.temp }}/paper2-production/upload/7/
+          EVIDENCE_8: ${{ runner.temp }}/paper2-production/upload/8/
+          EVIDENCE_9: ${{ runner.temp }}/paper2-production/upload/9/
+          EVIDENCE_10: ${{ runner.temp }}/paper2-production/upload/10/
+          EVIDENCE_11: ${{ runner.temp }}/paper2-production/upload/11/
+          EVIDENCE_12: ${{ runner.temp }}/paper2-production/upload/12/
+          EVIDENCE_13: ${{ runner.temp }}/paper2-production/upload/13/
+          EVIDENCE_14: ${{ runner.temp }}/paper2-production/upload/14/
+          EVIDENCE_15: ${{ runner.temp }}/paper2-production/upload/15/
+          EVIDENCE_16: ${{ runner.temp }}/paper2-production/upload/16/
+          EVIDENCE_17: ${{ runner.temp }}/paper2-production/upload/17/
+          EVIDENCE_18: ${{ runner.temp }}/paper2-production/upload/18/
+          EVIDENCE_19: ${{ runner.temp }}/paper2-production/upload/19/
+          EVIDENCE_20: ${{ runner.temp }}/paper2-production/upload/20/
+          EVIDENCE_21: ${{ runner.temp }}/paper2-production/upload/21/
+          EVIDENCE_22: ${{ runner.temp }}/paper2-production/upload/22/
+          EVIDENCE_23: ${{ runner.temp }}/paper2-production/upload/23/
+          EVIDENCE_24: ${{ runner.temp }}/paper2-production/upload/24/
+          EVIDENCE_25: ${{ runner.temp }}/paper2-production/control-upload/
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/paper2-failure-evidence"
+          echo "UNVERIFIED: failed attempt; inspection only; forbidden as replay or authorization input" > "$RUNNER_TEMP/paper2-failure-evidence/UNVERIFIED"
+          if [ -f src/paper2/prototype/failure_evidence.py ]; then
+            python -m src.paper2.prototype.failure_evidence --output "$RUNNER_TEMP/paper2-failure-evidence" "$EVIDENCE_0" "$EVIDENCE_1" "$EVIDENCE_2" "$EVIDENCE_3" "$EVIDENCE_4" "$EVIDENCE_5" "$EVIDENCE_6" "$EVIDENCE_7" "$EVIDENCE_8" "$EVIDENCE_9" "$EVIDENCE_10" "$EVIDENCE_11" "$EVIDENCE_12" "$EVIDENCE_13" "$EVIDENCE_14" "$EVIDENCE_15" "$EVIDENCE_16" "$EVIDENCE_17" "$EVIDENCE_18" "$EVIDENCE_19" "$EVIDENCE_20" "$EVIDENCE_21" "$EVIDENCE_22" "$EVIDENCE_23" "$EVIDENCE_24" "$EVIDENCE_25" "$RUNNER_TEMP/paper2-production/control" "$RUNNER_TEMP/paper2-production/working" "$RUNNER_TEMP/paper2-production/packet"
+          else
+            if [ -d "$RUNNER_TEMP/paper2-production/control" ]; then cp -al "$RUNNER_TEMP/paper2-production/control" "$RUNNER_TEMP/paper2-failure-evidence/early-control"; fi
+          fi
+          if [ -d "$RUNNER_TEMP/paper2-production/failure-upload" ]; then cp -a "$RUNNER_TEMP/paper2-production/failure-upload/." "$RUNNER_TEMP/paper2-failure-evidence/"; fi
+      - name: Upload UNVERIFIED failed attempt evidence
+        if: (failure() || cancelled()) && steps.failure_evidence.outcome == 'success'
+        env:
+          PAPER2_FAILURE_EVIDENCE: '1'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: failed-attempt-evidence-${{ github.run_id }}-${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/paper2-failure-evidence/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Stop aggregate monitor after evidence handling
+        if: always()
+        env:
+          PAPER2_FAILURE_EVIDENCE: '1'
+        run: touch "$RUNNER_TEMP/paper2-production/WATCHDOG_STOP"

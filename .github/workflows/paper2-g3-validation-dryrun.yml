@@ -17,8 +17,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [pass, band_and_invalid, invalid_invariant, one_invalid, two_invalid, replacement_pass, replacement_fail, replacement_invalid, replacement_invalid_invariant, secondary_missing, secondary_error, secondary_disagree, secondary_invariant, two_source, part_rerun]
+        scenario: [pass, band_and_invalid, invalid_invariant, one_invalid, two_invalid, replacement_pass, replacement_fail, replacement_invalid, replacement_invalid_invariant, secondary_missing, secondary_error, secondary_disagree, secondary_invariant, two_source, part_rerun, drain_only, dispatcher_load_only, dip_only]
     env:
+      PAPER2_RUNNER_LABEL: ubuntu-24.04
       PYTHONDONTWRITEBYTECODE: '1'
       SCENARIO: ${{ matrix.scenario }}
     steps:
@@ -36,16 +37,55 @@ jobs:
           python -m src.paper2.prototype.validation_dryrun create --scenario "$SCENARIO" --output "$RUNNER_TEMP/inputs"
       - name: Full validation prepare, primary and held-out replay, comparisons and sealed gather
         run: python -m src.paper2.prototype.validation_dryrun exercise --scenario "$SCENARIO" --inputs "$RUNNER_TEMP/inputs" --output "$RUNNER_TEMP/result"
+      - name: Verified upload inventory 1
+        id: inventory_verified_1
+        if: success()
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/result/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 1
+        id: seal_verified_1
+        if: success()
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/result/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
+        if: success() && steps.inventory_verified_1.outcome == 'success' && steps.seal_verified_1.outcome == 'success'
         with:
           name: synthetic-validation-${{ github.run_id }}-${{ matrix.scenario }}
           path: ${{ runner.temp }}/result/
           if-no-files-found: error
+      - name: Preserve UNVERIFIED failure evidence only
+        id: failure_evidence
+        if: failure() || cancelled()
+        env:
+          PAPER2_FAILURE_EVIDENCE: '1'
+          EVIDENCE_0: ${{ runner.temp }}/result/
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/paper2-failure-evidence"
+          echo "UNVERIFIED: failed attempt; inspection only; forbidden as replay or authorization input" > "$RUNNER_TEMP/paper2-failure-evidence/UNVERIFIED"
+          if [ -f src/paper2/prototype/failure_evidence.py ]; then
+            python -m src.paper2.prototype.failure_evidence --output "$RUNNER_TEMP/paper2-failure-evidence" "$EVIDENCE_0"
+          else
+            if [ -d "$RUNNER_TEMP/paper2-production/control" ]; then cp -al "$RUNNER_TEMP/paper2-production/control" "$RUNNER_TEMP/paper2-failure-evidence/early-control"; fi
+          fi
+          if [ -d "$RUNNER_TEMP/paper2-production/failure-upload" ]; then cp -a "$RUNNER_TEMP/paper2-production/failure-upload/." "$RUNNER_TEMP/paper2-failure-evidence/"; fi
+      - name: Upload UNVERIFIED failed attempt evidence
+        if: (failure() || cancelled()) && steps.failure_evidence.outcome == 'success'
+        env:
+          PAPER2_FAILURE_EVIDENCE: '1'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: failed-attempt-evidence-${{ github.run_id }}-${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/paper2-failure-evidence/
+          if-no-files-found: error
+          retention-days: 30
   timing_only:
     runs-on: ubuntu-24.04
     timeout-minutes: 330
     env:
+      PAPER2_RUNNER_LABEL: ubuntu-24.04
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - name: Set runner-temp paths
@@ -62,9 +102,47 @@ jobs:
           path: ${{ runner.temp }}/timing-inputs
       - name: TIMING ONLY primary and held-out simulations; no metrics or comparisons
         run: python -m src.paper2.prototype.validation_dryrun timing --inputs "$RUNNER_TEMP/timing-inputs" --output "$RUNNER_TEMP/timing.json"
+      - name: Verified upload inventory 1
+        id: inventory_verified_1
+        if: success()
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/timing.json
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 1
+        id: seal_verified_1
+        if: success()
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/timing.json
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
+        if: success() && steps.inventory_verified_1.outcome == 'success' && steps.seal_verified_1.outcome == 'success'
         with:
           name: timing-only-${{ github.run_id }}
           path: ${{ runner.temp }}/timing.json
           if-no-files-found: error
+      - name: Preserve UNVERIFIED failure evidence only
+        id: failure_evidence
+        if: failure() || cancelled()
+        env:
+          PAPER2_FAILURE_EVIDENCE: '1'
+          EVIDENCE_0: ${{ runner.temp }}/timing.json
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/paper2-failure-evidence"
+          echo "UNVERIFIED: failed attempt; inspection only; forbidden as replay or authorization input" > "$RUNNER_TEMP/paper2-failure-evidence/UNVERIFIED"
+          if [ -f src/paper2/prototype/failure_evidence.py ]; then
+            python -m src.paper2.prototype.failure_evidence --output "$RUNNER_TEMP/paper2-failure-evidence" "$EVIDENCE_0"
+          else
+            if [ -d "$RUNNER_TEMP/paper2-production/control" ]; then cp -al "$RUNNER_TEMP/paper2-production/control" "$RUNNER_TEMP/paper2-failure-evidence/early-control"; fi
+          fi
+          if [ -d "$RUNNER_TEMP/paper2-production/failure-upload" ]; then cp -a "$RUNNER_TEMP/paper2-production/failure-upload/." "$RUNNER_TEMP/paper2-failure-evidence/"; fi
+      - name: Upload UNVERIFIED failed attempt evidence
+        if: (failure() || cancelled()) && steps.failure_evidence.outcome == 'success'
+        env:
+          PAPER2_FAILURE_EVIDENCE: '1'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: failed-attempt-evidence-${{ github.run_id }}-${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/paper2-failure-evidence/
+          if-no-files-found: error
+          retention-days: 30

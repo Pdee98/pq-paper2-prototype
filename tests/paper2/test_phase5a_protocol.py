@@ -1,3 +1,4 @@
+import inspect
 """Hand-checked amended protocol, independent replay inputs, and export integrity."""
 
 from tests.paper2._provenance import setUpModule as provenance_setup, tearDownModule
@@ -201,13 +202,15 @@ class Protocol(unittest.TestCase):
         self.assertNotIn("pull_request:",text);self.assertNotIn("push:",text)
         self.assertIn("runs-on: ubuntu-24.04-arm",text)
         self.assertIn("timeout-minutes: 330",text)
-        self.assertIn("280m bash",text)
+        self.assertIn("--record-start",text)
+        from src.paper2.prototype import runner
+        self.assertIn("280*60",inspect.getsource(runner.remaining))
         job_env=text.split("    env:\n",1)[1].split("    steps:\n",1)[0]
         self.assertNotIn("runner.temp",job_env)
-        self.assertIn('echo "G3_ARTIFACTS=$RUNNER_TEMP/paper2-g3-artifacts" >> "$GITHUB_ENV"',text)
-        self.assertIn("path: ${{ runner.temp }}/paper2-g3-artifacts/",text)
+        self.assertIn('echo "G3_ROOT=$RUNNER_TEMP/paper2-production" >> "$GITHUB_ENV"',text)
+        self.assertIn("path: ${{ runner.temp }}/paper2-production/control-upload/",text)
         for log in ("local-tests.txt","native-build.log"):
-            self.assertIn('|| { tail -n 60 "$G3_ARTIFACTS/'+log+'"; exit 1; }',text)
+            self.assertIn('|| { tail -n 60 "$G3_ROOT/control/'+log+'"; exit 1; }',text)
         pins=json.loads((ROOT/"src/paper2/prototype/source_pins.json").read_text())
         workflows=text+(ROOT/"src/paper2/prototype/paper2-g3-replay.yml").read_text()
         for commit in pins["actions"].values():
@@ -223,7 +226,7 @@ class Protocol(unittest.TestCase):
             root=Path(root);manifest=export.export(root/"bundle",allow_dirty=True)
             receipt=manifest["actionlint"]
             self.assertEqual((receipt["returncode"],receipt["stdout"],receipt["stderr"]),(0,"",""))
-            self.assertEqual(set(manifest["actionlint_workflows"]),{"paper2-g3.yml","paper2-g3-replay.yml","paper2-g3-diagnostic.yml","paper2-g3-validation-dryrun.yml"})
+            self.assertEqual(set(manifest["actionlint_workflows"]),{"paper2-g3.yml","paper2-g3-replay.yml","paper2-g3-diagnostic.yml","paper2-g3-validation-dryrun.yml","paper2-g3-rehearsal.yml","paper2-g3-production-replay.yml"})
             for name,item in manifest["actionlint_workflows"].items():
                 self.assertEqual((item["returncode"],item["stdout"],item["stderr"]),(0,"",""))
                 self.assertEqual(item["workflow_sha256"],analysis.sha256_file(root/"bundle/.github/workflows"/name))

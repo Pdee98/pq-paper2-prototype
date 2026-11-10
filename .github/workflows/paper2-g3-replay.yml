@@ -27,6 +27,7 @@ jobs:
       matrix: ${{ steps.inputs.outputs.matrix }}
       code_commit: ${{ steps.inputs.outputs.code_commit }}
     env:
+      PAPER2_RUNNER_LABEL: ubuntu-24.04
       PYTHONDONTWRITEBYTECODE: '1'
       SOURCE_RUN_ID: ${{ inputs.source_run_id }}
       SOURCE_ML_DSA_RUN_ID: ${{ inputs.ml_dsa_source_run_id }}
@@ -67,6 +68,7 @@ jobs:
       max-parallel: 20
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     env:
+      PAPER2_RUNNER_LABEL: ubuntu-24.04
       PYTHONDONTWRITEBYTECODE: '1'
       SOURCE_RUN_ID: ${{ inputs.source_run_id }}
       SOURCE_ML_DSA_RUN_ID: ${{ inputs.ml_dsa_source_run_id }}
@@ -101,20 +103,71 @@ jobs:
         run: python -m src.paper2.prototype.split_replay --xmss "$RUNNER_TEMP/source-x" --ml-dsa "$RUNNER_TEMP/source-m" --xmss-run-id "$SOURCE_RUN_ID" --ml-dsa-run-id "$SOURCE_ML_DSA_RUN_ID" --output "$RUNNER_TEMP/inputs"
       - name: Replay primary and held-out inputs, check invariants and compare
         run: timeout --signal=TERM --kill-after=30s "$((REPLAY_TIMEOUT_MINUTES - 5))m" python -m "$REPLAY_MODULE" run --inputs "$RUNNER_TEMP/inputs" --source-run-id "$SOURCE_RUN_ID" --run-id "$REPLAY_RUN_ID" --output "$RUNNER_TEMP/result"
+      - name: Verified upload inventory 1
+        id: inventory_verified_1
+        if: success()
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/result/replay-progress.jsonl
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 1
+        id: seal_verified_1
+        if: success()
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/result/replay-progress.jsonl
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
       - name: Preserve flushed replay progress, including timeout evidence
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
+        if: success() && steps.inventory_verified_1.outcome == 'success' && steps.seal_verified_1.outcome == 'success'
         with:
           name: paper2-g3-replay-progress-${{ github.run_id }}-${{ matrix.run_id }}
           path: ${{ runner.temp }}/result/replay-progress.jsonl
           if-no-files-found: warn
           retention-days: 30
+      - name: Verified upload inventory 2
+        id: inventory_verified_2
+        if: success()
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/result/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 2
+        id: seal_verified_2
+        if: success()
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/result/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
+        if: success() && steps.inventory_verified_2.outcome == 'success' && steps.seal_verified_2.outcome == 'success'
         with:
           name: paper2-g3-replay-result-${{ github.run_id }}-${{ matrix.run_id }}
           path: ${{ runner.temp }}/result/
           if-no-files-found: warn
+          retention-days: 30
+      - name: Preserve UNVERIFIED failure evidence only
+        id: failure_evidence
+        if: failure() || cancelled()
+        env:
+          PAPER2_FAILURE_EVIDENCE: '1'
+          EVIDENCE_0: ${{ runner.temp }}/result/replay-progress.jsonl
+          EVIDENCE_1: ${{ runner.temp }}/result/
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/paper2-failure-evidence"
+          echo "UNVERIFIED: failed attempt; inspection only; forbidden as replay or authorization input" > "$RUNNER_TEMP/paper2-failure-evidence/UNVERIFIED"
+          if [ -f src/paper2/prototype/failure_evidence.py ]; then
+            python -m src.paper2.prototype.failure_evidence --output "$RUNNER_TEMP/paper2-failure-evidence" "$EVIDENCE_0" "$EVIDENCE_1"
+          else
+            if [ -d "$RUNNER_TEMP/paper2-production/control" ]; then cp -al "$RUNNER_TEMP/paper2-production/control" "$RUNNER_TEMP/paper2-failure-evidence/early-control"; fi
+          fi
+          if [ -d "$RUNNER_TEMP/paper2-production/failure-upload" ]; then cp -a "$RUNNER_TEMP/paper2-production/failure-upload/." "$RUNNER_TEMP/paper2-failure-evidence/"; fi
+      - name: Upload UNVERIFIED failed attempt evidence
+        if: (failure() || cancelled()) && steps.failure_evidence.outcome == 'success'
+        env:
+          PAPER2_FAILURE_EVIDENCE: '1'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: failed-attempt-evidence-${{ github.run_id }}-${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/paper2-failure-evidence/
+          if-no-files-found: error
           retention-days: 30
   gather:
     needs: [prepare, matrix]
@@ -122,6 +175,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
+      PAPER2_RUNNER_LABEL: ubuntu-24.04
       PYTHONDONTWRITEBYTECODE: '1'
       SOURCE_RUN_ID: ${{ inputs.source_run_id }}
       SOURCE_ML_DSA_RUN_ID: ${{ inputs.ml_dsa_source_run_id }}
@@ -160,10 +214,48 @@ jobs:
           path: ${{ runner.temp }}/results
       - name: Gather every repetition; missing or corrupt results fail G3
         run: python -m "$REPLAY_MODULE" gather --inputs "$RUNNER_TEMP/inputs" --source-run-id "$SOURCE_RUN_ID" --results "$RUNNER_TEMP/results" --output "$RUNNER_TEMP/g3-report"
+      - name: Verified upload inventory 1
+        id: inventory_verified_1
+        if: success()
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/g3-report/
+        run: python -m src.paper2.prototype.upload_gate inventory --root "$UPLOAD_PATH"
+      - name: Verified upload seal 1
+        id: seal_verified_1
+        if: success()
+        env:
+          UPLOAD_PATH: ${{ runner.temp }}/g3-report/
+        run: python -m src.paper2.prototype.upload_gate seal --root "$UPLOAD_PATH"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
+        if: success() && steps.inventory_verified_1.outcome == 'success' && steps.seal_verified_1.outcome == 'success'
         with:
           name: paper2-g3-replay-report-${{ github.run_id }}
           path: ${{ runner.temp }}/g3-report/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Preserve UNVERIFIED failure evidence only
+        id: failure_evidence
+        if: failure() || cancelled()
+        env:
+          PAPER2_FAILURE_EVIDENCE: '1'
+          EVIDENCE_0: ${{ runner.temp }}/g3-report/
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/paper2-failure-evidence"
+          echo "UNVERIFIED: failed attempt; inspection only; forbidden as replay or authorization input" > "$RUNNER_TEMP/paper2-failure-evidence/UNVERIFIED"
+          if [ -f src/paper2/prototype/failure_evidence.py ]; then
+            python -m src.paper2.prototype.failure_evidence --output "$RUNNER_TEMP/paper2-failure-evidence" "$EVIDENCE_0"
+          else
+            if [ -d "$RUNNER_TEMP/paper2-production/control" ]; then cp -al "$RUNNER_TEMP/paper2-production/control" "$RUNNER_TEMP/paper2-failure-evidence/early-control"; fi
+          fi
+          if [ -d "$RUNNER_TEMP/paper2-production/failure-upload" ]; then cp -a "$RUNNER_TEMP/paper2-production/failure-upload/." "$RUNNER_TEMP/paper2-failure-evidence/"; fi
+      - name: Upload UNVERIFIED failed attempt evidence
+        if: (failure() || cancelled()) && steps.failure_evidence.outcome == 'success'
+        env:
+          PAPER2_FAILURE_EVIDENCE: '1'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: failed-attempt-evidence-${{ github.run_id }}-${{ github.job }}-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/paper2-failure-evidence/
           if-no-files-found: error
           retention-days: 30

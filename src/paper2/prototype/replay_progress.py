@@ -15,6 +15,19 @@ from ..verify.observer import OBSERVER
 CURRENT = ContextVar('paper2_replay_progress', default=None)
 
 
+def host_receipt():
+    import os, platform
+    cpu = platform.processor()
+    try:
+        lines = Path("/proc/cpuinfo").read_text().splitlines()
+        cpu = next((line.split(":",1)[1].strip() for line in lines if line.lower().startswith("model name")), cpu)
+    except OSError: pass
+    return dict(runner_label=os.environ.get("PAPER2_RUNNER_LABEL", "NOT RECORDED"),
+                os_image=os.environ.get("ImageOS", platform.platform()),
+                os_image_version=os.environ.get("ImageVersion", "NOT RECORDED"),
+                cpu_model=cpu or "NOT RECORDED")
+
+
 def checkout_receipt():
     from ..model.engine import _git_state
     state = _git_state()
@@ -22,7 +35,7 @@ def checkout_receipt():
     return dict(replay_code_commit=None if exported else state['commit'],
                 replay_tree_clean=None if exported else not state['dirty'],
                 checkout_kind='export without Git checkout' if exported else 'git checkout',
-                export_source_commit=state['commit'] if exported else None)
+                export_source_commit=state['commit'] if exported else None, host=host_receipt())
 
 
 def record_source_commit(commit):

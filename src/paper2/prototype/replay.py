@@ -1,6 +1,7 @@
 """Hash-bound deterministic replay and full checking of public signed evidence."""
 
 import argparse
+from contextvars import ContextVar
 import csv
 import hashlib
 import json
@@ -21,6 +22,7 @@ from ..verify.observer import emit
 from .replay_budget import matrix_entry
 from .validity import from_events as prototype_validity
 
+DIAGNOSTIC_REHEARSAL = ContextVar("paper2_diagnostic_rehearsal", default=False)
 SCHEMA="paper2-g3-replay-v1"
 PENDING="prototype-complete: replay pending"
 EXCLUSION="dispatcher-bound, not a valid worker-contention test"
@@ -89,6 +91,8 @@ def seal(directory,name,extra=None):
 
 
 def verify_files(directory,name):
+    from .input_trust import reject
+    reject(directory)
     directory=Path(directory);path=directory/name
     if sha256_file(path)!=(directory/(name+".sha256")).read_text().strip():raise ValueError("replay manifest SHA-256 mismatch")
     data=read(path);seen=set()
@@ -127,8 +131,10 @@ def write_index(root,index):
 
 
 def verify_index(root,source_run_id=None,complete=True):
+    from .input_trust import reject
+    reject(root)
     root=Path(root);index=read(root/"INDEX.json")
-    if str(index.get("purpose","")).startswith("DIAGNOSTIC"):raise ValueError("DIAGNOSTIC inputs excluded from G3 assessment")
+    if str(index.get("purpose","")).startswith("DIAGNOSTIC") and not DIAGNOSTIC_REHEARSAL.get():raise ValueError("DIAGNOSTIC inputs excluded from G3 assessment")
     if sha256_file(root/"INDEX.json")!=(root/"INDEX.sha256").read_text().strip():raise ValueError("replay index SHA-256 mismatch")
     if index["schema"]!=SCHEMA or not re.fullmatch(r"[0-9a-f]{40}",index["code_commit"]):raise ValueError("invalid replay index provenance")
     if source_run_id is not None and index["source_run_id"]!=str(source_run_id):raise ValueError("source run identity mismatch")
@@ -136,7 +142,7 @@ def verify_index(root,source_run_id=None,complete=True):
     if len(cells)!=len(index['cells']) or any(isinstance(i,bool) or not isinstance(i,int) or i<0 for i in cells):raise ValueError('invalid global cell identities')
     followup=index.get('followup_cells',[])
     if len(set(followup))!=len(followup) or any(isinstance(i,bool) or not isinstance(i,int) or i not in cells or cells[i].get('role')=='secondary' for i in followup):raise ValueError('invalid follow-up cell list')
-    expected={('secondary-regime' if c.get('role')=='secondary' else f"cell{i}-r{r}"):(i,r) for i,c in cells.items() if c["dispatcher_utilisation"]<=.5 for r in range(1 if c.get('role')=='secondary' else (4 if i in followup else 3))}
+    expected={('secondary-regime' if c.get('role')=='secondary' else f"cell{i}-r{r}"):(i,r) for i,c in cells.items() if c["dispatcher_utilisation"]<=.5 for r in range(1 if c.get('role')=='secondary' or DIAGNOSTIC_REHEARSAL.get() and str(index.get('purpose','')).startswith('DIAGNOSTIC') else (4 if i in followup else 3))}
     excluded=[dict(cell=c,reason=EXCLUSION) for c in index["cells"] if c["dispatcher_utilisation"]>.5]
     if index["excluded_cells"]!=excluded:raise ValueError("exclusion/guard mismatch")
     required={rid for rid,(i,rep) in expected.items() if cells[i].get('role')!='secondary'}
@@ -192,6 +198,11 @@ def create_packet(directory,config,corpus_path,prototype,held_out,cell,replicate
     if callback_cost.is_file():originals["prototype/callback_overhead.json"]=callback_cost
     for worker_path in sorted(Path(prototype['events']).parent.glob('worker-*/*.json')):
         originals['prototype/'+worker_path.parent.name+'/'+worker_path.name]=worker_path
+    # Preserve every runtime output, including diagnostic binary pause buffers.
+    for extra in sorted(Path(prototype["manifest"]).parent.rglob("*")):
+        if extra.is_file():
+            rel="prototype/"+extra.relative_to(Path(prototype["manifest"]).parent).as_posix()
+            originals.setdefault(rel,extra)
     for value in values.values():audit_value(value)
     for path in originals.values():audit_file(path)
     for sample in ([held_out,primary] if primary is not None else [held_out]):
@@ -235,7 +246,7 @@ def packet(root,index,run):
     if sha256_file(directory/"REPLAY_MANIFEST.json")!=run["manifest_sha256"]:raise ValueError("repetition manifest SHA-256 mismatch")
     verify_files(directory,"REPLAY_MANIFEST.json")
     info=read(directory/"info.json")
-    if info["source_commit"]!=index["code_commit"] or info["cell"]!=cell_map(index)[run["cell_id"]] or info["replicate"]!=run["replicate"]:
+    if info["source_commit"]!=index["code_commit"] or info["cell"]!=run.get("cell",cell_map(index)[run["cell_id"]]) or info["replicate"]!=run["replicate"]:
         raise ValueError("repetition provenance mismatch")
     return directory,info
 
@@ -355,6 +366,9 @@ def execute(root,run_id,output,source_run_id=None):
         seeds=info["seeds"])
     try:
         result["prototype"]=stage("prototype post-processing",postprocess_prototype,directory,output/"prototype-check")
+        if read(directory/'config.json').get('g3_input_version')==6:
+            from .measurement_conditions import apply
+            stage('production measurement conditions',apply,result['prototype'],directory,info['window'])
         if not result["prototype"]["validity"]["passed"] and info['cell'].get('role')!='secondary':
             result["status"]="INVALID: prototype validity guard"
             save(output/"result.json",result);seal(output,"RESULT_MANIFEST.json")
@@ -441,6 +455,8 @@ def seal_aggregate(output,source_commit):
 
 
 def verify_aggregate(output,source_commit=None):
+    from .input_trust import reject
+    reject(output)
     output=Path(output)
     if not (output/'RESULT_MANIFEST.json').is_file():raise ValueError('aggregate is unsealed')
     manifest=verify_files(output,'RESULT_MANIFEST.json')

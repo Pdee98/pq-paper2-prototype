@@ -361,7 +361,9 @@ def main():
     if a.require_validation_caps:
         from .validation_caps import BLOCK_MESSAGE
         raise SystemExit(BLOCK_MESSAGE)
-    elif a.record_start:save(a.record_start/"watchdog.json",dict(monotonic_ns=time.monotonic_ns(),work_minutes=280,upload_minutes=10))
+    elif a.record_start:
+        from .work_budget import start
+        start(a.record_start)
     elif a.record_host:record_host(a.record_host)
     elif a.hash_artifacts:hash_artifacts(a.hash_artifacts)
     elif a.execute and a.output and os.environ.get("GITHUB_ACTIONS")=="true":execute(a.output)

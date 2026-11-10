@@ -1,0 +1,21 @@
+{
+  "backends": {
+    "xmss": {
+      "packet_raw_per_tx": 11725.879062510658,
+      "packet_compressed_per_tx": 2078.650692289329,
+      "compact_compressed_per_tx": 183.43054087235276,
+      "compact_raw_per_tx": 355.38474917300414,
+      "full_corpus_per_tx": 13192,
+      "full_corpus_basis": "conservative signature hex + 8 KiB per message; UNVERIFIED bound"
+    },
+    "ml_dsa_44": {
+      "packet_raw_per_tx": 11689.058399496604,
+      "packet_compressed_per_tx": 2074.833786759943,
+      "compact_compressed_per_tx": 183.77927377713618,
+      "compact_raw_per_tx": 355.7364851109507,
+      "full_corpus_per_tx": 13032,
+      "full_corpus_basis": "conservative signature hex + 8 KiB per message; UNVERIFIED bound"
+    }
+  },
+  "native_calibration_reserve_bytes": 3221225472
+}
