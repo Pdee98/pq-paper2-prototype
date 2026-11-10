@@ -10,6 +10,11 @@ jobs:
     env:
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
+      - name: Run 7 preparation gate (unconditional)
+        shell: bash
+        run: |
+          echo "Run #7 blocked: replay timeouts not finalised; dry-run and timing receipts required"
+          exit 1
       - name: Set runner-temp paths
         shell: bash
         run: |

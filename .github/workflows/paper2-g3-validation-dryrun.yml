@@ -1,0 +1,70 @@
+name: paper2-g3-validation-dryrun
+on:
+  workflow_dispatch:
+    inputs:
+      timing_source_run_id:
+        description: v5 diagnostic source for the separate timing-only job
+        type: string
+        required: true
+        default: '42354911778'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  synthetic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [pass, band_and_invalid, invalid_invariant, one_invalid, two_invalid, replacement_pass, replacement_fail, replacement_invalid, replacement_invalid_invariant, secondary_missing, secondary_error, secondary_disagree, secondary_invariant, two_source, part_rerun]
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      SCENARIO: ${{ matrix.scenario }}
+    steps:
+      - name: Set runner-temp paths
+        run: echo "PYTHONPYCACHEPREFIX=$RUNNER_TEMP/paper2-dryrun-pycache" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Prepare SYNTHETIC packets only
+        # Synthetic public fixtures use the existing Ed25519 sleep backend.
+        # Provisioning is separate from runner self-tests.
+        run: |
+          python -m pip install --disable-pip-version-check cryptography==45.0.7
+          python -m src.paper2.prototype.validation_dryrun create --scenario "$SCENARIO" --output "$RUNNER_TEMP/inputs"
+      - name: Full validation prepare, primary and held-out replay, comparisons and sealed gather
+        run: python -m src.paper2.prototype.validation_dryrun exercise --scenario "$SCENARIO" --inputs "$RUNNER_TEMP/inputs" --output "$RUNNER_TEMP/result"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: synthetic-validation-${{ github.run_id }}-${{ matrix.scenario }}
+          path: ${{ runner.temp }}/result/
+          if-no-files-found: error
+  timing_only:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Set runner-temp paths
+        run: echo "PYTHONPYCACHEPREFIX=$RUNNER_TEMP/paper2-timing-pycache" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: paper2-g3-diagnostic-inputs-${{ inputs.timing_source_run_id }}
+          run-id: ${{ inputs.timing_source_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/timing-inputs
+      - name: TIMING ONLY primary and held-out simulations; no metrics or comparisons
+        run: python -m src.paper2.prototype.validation_dryrun timing --inputs "$RUNNER_TEMP/timing-inputs" --output "$RUNNER_TEMP/timing.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: timing-only-${{ github.run_id }}
+          path: ${{ runner.temp }}/timing.json
+          if-no-files-found: error

@@ -120,7 +120,7 @@ class Deviation4(unittest.TestCase):
         with patch.object(diagnostic.platform,"machine",return_value="aarch64"), \
              patch.object(diagnostic.os,"sched_getaffinity",return_value={0,1,2},create=True):
             with self.assertRaisesRegex(RuntimeError,"at least four"):diagnostic.preflight()
-        with self.assertRaisesRegex(RuntimeError,"diagnostic"):
+        with self.assertRaisesRegex(RuntimeError,"Run #7 blocked"):
             runner.execute(Path(tempfile.gettempdir())/"not-created-deviation4")
         text=(ROOT/"src/paper2/prototype/paper2-g3-diagnostic.yml").read_text()
         for marker in ("workflow_dispatch:","ubuntu-24.04-arm","diagnostic preflight","diagnostic collect","timeout-minutes: 180"):

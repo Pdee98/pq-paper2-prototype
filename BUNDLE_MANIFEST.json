@@ -1,6 +1,6 @@
 {
   "schema": "paper2-export-v1",
-  "source_commit": "1a82837a3c7d0bbc3071332068557cda7f142e2a",
+  "source_commit": "f1efc99417a7fdc59164c7ea46b9b547aec98fe6",
   "source_dirty": false,
   "baseline_sha256": "83b4a814f99c851c0b5fa4c44e6c2999ceff5f751f70f387e9dac03ec03079f3",
   "baseline_path": "PROTECTED_SHA256.txt",
@@ -47,7 +47,7 @@
     "returncode": 0,
     "stdout": "",
     "stderr": "",
-    "workflow_sha256": "f5a4a5538dc2c1f9cba7a5ff17acc8ee2badb376a394366cba4cd7ac7b69a0ff"
+    "workflow_sha256": "fd8b8a97e7d1917b3bee7a11edda17217e135c48810b2130795d372ca3dad157"
   },
   "actionlint_workflows": {
     "paper2-g3-diagnostic.yml": {
@@ -64,7 +64,15 @@
       "returncode": 0,
       "stdout": "",
       "stderr": "",
-      "workflow_sha256": "f88e33675844adc944626ac3445a55d150706e538ff141a1a7ec239bb3ae6636"
+      "workflow_sha256": "0f1bb5634454408af3b61a2ce7e648a7ff5aced007cafaa56961b5031813f72b"
+    },
+    "paper2-g3-validation-dryrun.yml": {
+      "version": "1.7.12",
+      "package_version": "1.7.12.25",
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "",
+      "workflow_sha256": "cfa394842d8c3712a9d57c2afdb9ba01b9a927a119b1414b6f93f82ba93119ad"
     },
     "paper2-g3.yml": {
       "version": "1.7.12",
@@ -72,7 +80,7 @@
       "returncode": 0,
       "stdout": "",
       "stderr": "",
-      "workflow_sha256": "f5a4a5538dc2c1f9cba7a5ff17acc8ee2badb376a394366cba4cd7ac7b69a0ff"
+      "workflow_sha256": "fd8b8a97e7d1917b3bee7a11edda17217e135c48810b2130795d372ca3dad157"
     }
   },
   "files": [
@@ -87,14 +95,21 @@
       "path": ".github/workflows/paper2-g3-replay.yml",
       "origin": "generated",
       "origin_path": "generated:src/paper2/prototype/paper2-g3-replay.yml",
-      "sha256": "f88e33675844adc944626ac3445a55d150706e538ff141a1a7ec239bb3ae6636",
+      "sha256": "0f1bb5634454408af3b61a2ce7e648a7ff5aced007cafaa56961b5031813f72b",
+      "frozen": false
+    },
+    {
+      "path": ".github/workflows/paper2-g3-validation-dryrun.yml",
+      "origin": "generated",
+      "origin_path": "generated:src/paper2/prototype/paper2-g3-validation-dryrun.yml",
+      "sha256": "cfa394842d8c3712a9d57c2afdb9ba01b9a927a119b1414b6f93f82ba93119ad",
       "frozen": false
     },
     {
       "path": ".github/workflows/paper2-g3.yml",
       "origin": "generated",
       "origin_path": "generated:src/paper2/prototype/paper2-g3.yml",
-      "sha256": "f5a4a5538dc2c1f9cba7a5ff17acc8ee2badb376a394366cba4cd7ac7b69a0ff",
+      "sha256": "fd8b8a97e7d1917b3bee7a11edda17217e135c48810b2130795d372ca3dad157",
       "frozen": false
     },
     {
@@ -114,7 +129,7 @@
       "path": "README.md",
       "origin": "generated",
       "origin_path": "generated",
-      "sha256": "6274a4fe374f62ffd4bb1c55a24af019b00673c2b5b19e9f2fb9166178e8cb97",
+      "sha256": "f04235cdabf7546f059fdaa6cb163145345a71b105586bf180e7c1464a151914",
       "frozen": false
     },
     {
@@ -232,6 +247,12 @@
       "frozen": false
     },
     {
+      "path": "src/paper2/prototype/aggregate.py",
+      "origin_path": "src/paper2/prototype/aggregate.py",
+      "sha256": "8949f15b1b3c0e406a0bad5b0a5c9b4e88cec76cf8c31c41836a3a4e471370f2",
+      "frozen": false
+    },
+    {
       "path": "src/paper2/prototype/analysis.py",
       "origin_path": "src/paper2/prototype/analysis.py",
       "sha256": "388273d62ea3f6f10539e2bd19741075e456d8867bfe3a7c371e74d669685ff8",
@@ -318,7 +339,7 @@
     {
       "path": "src/paper2/prototype/diagnostic.py",
       "origin_path": "src/paper2/prototype/diagnostic.py",
-      "sha256": "f2577c598d77b88d5811f8e1849b277f1a27c9b35ddcd7a385d329e08cbe13c1",
+      "sha256": "5c0d08a7ef7f8c66b9fb99f10f4fd0cac43ac28434e18c616f2ab4ec1ade9b98",
       "frozen": false
     },
     {
@@ -330,7 +351,13 @@
     {
       "path": "src/paper2/prototype/export.py",
       "origin_path": "src/paper2/prototype/export.py",
-      "sha256": "209c2d6964839f6e7852793dbdfacbcee7619e58b37ce422b724e6944ec05d95",
+      "sha256": "ee187bb4765958dadc7a1f6b55a7d6f93417a81b5a5a68d46e7572350c896f8f",
+      "frozen": false
+    },
+    {
+      "path": "src/paper2/prototype/g3_decision.py",
+      "origin_path": "src/paper2/prototype/g3_decision.py",
+      "sha256": "db404c8ee6f27d4ee759518c9a89dbca58cc0e5282e863322102bab7a4770086",
       "frozen": false
     },
     {
@@ -348,13 +375,19 @@
     {
       "path": "src/paper2/prototype/paper2-g3-replay.yml",
       "origin_path": "src/paper2/prototype/paper2-g3-replay.yml",
-      "sha256": "f88e33675844adc944626ac3445a55d150706e538ff141a1a7ec239bb3ae6636",
+      "sha256": "0f1bb5634454408af3b61a2ce7e648a7ff5aced007cafaa56961b5031813f72b",
+      "frozen": false
+    },
+    {
+      "path": "src/paper2/prototype/paper2-g3-validation-dryrun.yml",
+      "origin_path": "src/paper2/prototype/paper2-g3-validation-dryrun.yml",
+      "sha256": "cfa394842d8c3712a9d57c2afdb9ba01b9a927a119b1414b6f93f82ba93119ad",
       "frozen": false
     },
     {
       "path": "src/paper2/prototype/paper2-g3.yml",
       "origin_path": "src/paper2/prototype/paper2-g3.yml",
-      "sha256": "10ad2a2f3f6ba74c2a3dae85b52f476c3ee14a7e6c5662e3926fffcf3eb076de",
+      "sha256": "4732084d9e7cc7f37b6386712d73814535bb75378d68a33a4860c36cff564fa2",
       "frozen": false
     },
     {
@@ -390,7 +423,7 @@
     {
       "path": "src/paper2/prototype/replay.py",
       "origin_path": "src/paper2/prototype/replay.py",
-      "sha256": "72c6fee11918a6ce88d3dc89f9c504ba26175d1c04f386cbf4bc6a0744e56936",
+      "sha256": "1178c415884bc80c0bc15845fcc672f98cda0ffc832024b4c9a02e2804526b55",
       "frozen": false
     },
     {
@@ -408,7 +441,7 @@
     {
       "path": "src/paper2/prototype/runner.py",
       "origin_path": "src/paper2/prototype/runner.py",
-      "sha256": "a22253d9601f7447b319ce539585d702f0118d22d56090e497ad74370da179a5",
+      "sha256": "021a3bd9d5a5a17a67d8ba571505895e0fe8b3dfd278ed4e49b7947d0e1f2f7c",
       "frozen": false
     },
     {
@@ -427,6 +460,24 @@
       "path": "src/paper2/prototype/source_pins.json",
       "origin_path": "src/paper2/prototype/source_pins.json",
       "sha256": "f2cc0413d527bfcfed762dcf2767059bc0faf7c68b088c12cb3129405fa887ef",
+      "frozen": false
+    },
+    {
+      "path": "src/paper2/prototype/split_replay.py",
+      "origin_path": "src/paper2/prototype/split_replay.py",
+      "sha256": "3ae3f7beaaee0083d04e1246f17d99b9b3f9d1f6ba39249b8de79ff5e1484724",
+      "frozen": false
+    },
+    {
+      "path": "src/paper2/prototype/validation_caps.py",
+      "origin_path": "src/paper2/prototype/validation_caps.py",
+      "sha256": "3cca8dc50feb5267dc012582332ed3e9e80b65ee17f43d09385359f2ed9629ae",
+      "frozen": false
+    },
+    {
+      "path": "src/paper2/prototype/validation_dryrun.py",
+      "origin_path": "src/paper2/prototype/validation_dryrun.py",
+      "sha256": "6d64584829453a1218acdd5ccc5ba86cc9b9960e14edbf7ac66ea6bf5833e471",
       "frozen": false
     },
     {
@@ -564,13 +615,13 @@
     {
       "path": "tests/paper2/test_phase5a_deviation4.py",
       "origin_path": "tests/paper2/test_phase5a_deviation4.py",
-      "sha256": "2252e657ba47efb8b2d400266567f5b8a96406faa622cee3e92cecc5f018c8b5",
+      "sha256": "bc53de7ffab7741de9282c4a20d13693827007e4de10f74457b26737a47e7f00",
       "frozen": false
     },
     {
       "path": "tests/paper2/test_phase5a_deviation5.py",
       "origin_path": "tests/paper2/test_phase5a_deviation5.py",
-      "sha256": "31eeb625f0d6b3bc2315a25fe80a5b2a2dd4749c99875daa651448ce64881f5d",
+      "sha256": "f235ce190f80d16b907575e37f0569fa6f396d3444e7b47e4196eaef353c28ad",
       "frozen": false
     },
     {
@@ -586,6 +637,12 @@
       "frozen": false
     },
     {
+      "path": "tests/paper2/test_phase5a_deviation8.py",
+      "origin_path": "tests/paper2/test_phase5a_deviation8.py",
+      "sha256": "e58b441575b25ed47359c748405e267206befc30f5ba448a9b64f37a4783b2f7",
+      "frozen": false
+    },
+    {
       "path": "tests/paper2/test_phase5a_dispatcher.py",
       "origin_path": "tests/paper2/test_phase5a_dispatcher.py",
       "sha256": "def0773ee7a778e336bcd1afda6e4037b5b4a6e548c3189644d0a0f7155f2832",
@@ -598,6 +655,12 @@
       "frozen": false
     },
     {
+      "path": "tests/paper2/test_phase5a_preparation.py",
+      "origin_path": "tests/paper2/test_phase5a_preparation.py",
+      "sha256": "1bf3e628e41b9efb6105c625ba229e2736f46bd96970a25bcba03dc7e8adffe1",
+      "frozen": false
+    },
+    {
       "path": "tests/paper2/test_phase5a_prev5.py",
       "origin_path": "tests/paper2/test_phase5a_prev5.py",
       "sha256": "618a7aa88d0c77efaeeae085f04659be6a42bad83b97edbfb3338207b5581a1a",
@@ -606,7 +669,7 @@
     {
       "path": "tests/paper2/test_phase5a_protocol.py",
       "origin_path": "tests/paper2/test_phase5a_protocol.py",
-      "sha256": "612b37735ad03ed2c7deda753e728a90531a2ef38a328614c368dedeba5263ad",
+      "sha256": "b90c94e989578d189b775dc8d5e374bf1db58f3024e846b4bf5db14e45792310",
       "frozen": false
     },
     {
@@ -618,13 +681,19 @@
     {
       "path": "tests/paper2/test_phase5a_replay.py",
       "origin_path": "tests/paper2/test_phase5a_replay.py",
-      "sha256": "4f2772602aa40837100b09594962b431f3d2409e1c1e4f6d0e0eb1252ff3de1b",
+      "sha256": "00c80307f763b09e42de05a03a903076371bbbd91f99429a5582d617b270c338",
       "frozen": false
     },
     {
       "path": "tests/paper2/test_phase5a_replay_performance.py",
       "origin_path": "tests/paper2/test_phase5a_replay_performance.py",
       "sha256": "3e168f42d089709ad9b1783990a018d780dfb002c064f36428aed53d6b4e6cc5",
+      "frozen": false
+    },
+    {
+      "path": "tests/paper2/test_phase5a_split.py",
+      "origin_path": "tests/paper2/test_phase5a_split.py",
+      "sha256": "58b06faaba428aa3b0d15cc7aaa023c2e5d96c3125fdd22e5dbbcea25a3b301f",
       "frozen": false
     }
   ],
@@ -637,5 +706,8 @@
     "artifacts",
     "__pycache__"
   ],
-  "no_results_or_calibration_data": true
+  "no_results_or_calibration_data": true,
+  "preparation_only": true,
+  "validation_blocked": true,
+  "validation_gate": "Run #7 blocked: replay timeouts not finalised; dry-run and timing receipts required"
 }

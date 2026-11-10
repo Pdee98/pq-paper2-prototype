@@ -370,6 +370,7 @@ def main():
         runner.save(a.output/'DIAGNOSTIC_V5_SUMMARY.json',dict(purpose=PURPOSE,excluded_from_G3=True,
             skipped_cells=index.get('skipped_cells',[]),cells=reports,
             next_action='AUTHOR REVIEW' if reports and all(r['next_action'].startswith('AUTHOR REVIEW') for r in reports) else 'STOP: report to author'))
+        replay.seal_aggregate(a.output,index['code_commit'])
 
 
 if __name__=="__main__":main()

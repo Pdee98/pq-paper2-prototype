@@ -65,8 +65,8 @@ class Replay(unittest.TestCase):
             self.assertEqual(result["primary"]["violations"],[])
             self.assertEqual(result["held_out"]["violations"],[])
             report=replay.gather(self.inputs,root/"execution",root/"gather","123")
-            self.assertEqual(report["status"],"failed")
-            self.assertEqual({v["run_id"] for v in report["failures"] if v["check"]=="missing repetition"},{"cell0-r1","cell0-r2"})
+            self.assertNotEqual(report["status"],"passed")
+            self.assertEqual({v["run_id"] for v in report["missing_primary"] if v["check"]=="missing repetition"},{"cell0-r1","cell0-r2"})
 
     def test_hash_mismatch_and_source_identity_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -114,8 +114,8 @@ class Replay(unittest.TestCase):
         self.assertEqual(bad["status"],"failed")
         self.assertTrue(any(f["check"]=="mean_block_delay" for f in bad["failures"]))
         missing=replay.gather_records(self.index,self.records()[:2])
-        self.assertEqual(missing["status"],"failed")
-        self.assertIn(dict(run_id="cell0-r2",check="missing repetition"),missing["failures"])
+        self.assertEqual(missing["status"],"inconclusive")
+        self.assertIn(dict(run_id="cell0-r2",check="missing repetition"),missing["missing_primary"])
         self.assertEqual(replay.gather_records(self.index,self.records()+self.records()[:1])["status"],"failed")
         for kind in ("prototype","primary","held_out"):
             records=self.records();records[0][kind]["violations"]=[dict(code="mutation")]

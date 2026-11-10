@@ -341,8 +341,8 @@ def record_host(root):
 
 
 def execute(root):
-    from .cycle_runner import execute as cycle_execute
-    return cycle_execute(root)
+    from .validation_caps import BLOCK_MESSAGE
+    raise RuntimeError(BLOCK_MESSAGE)
 
 
 def hash_artifacts(root):
@@ -359,7 +359,8 @@ def main():
     p.add_argument("--require-validation-caps",action="store_true")
     a=p.parse_args()
     if a.require_validation_caps:
-        if ENGINEERING_CAPS is None:raise SystemExit("STOP: validation awaits ARM diagnostic; engineering caps unset")
+        from .validation_caps import BLOCK_MESSAGE
+        raise SystemExit(BLOCK_MESSAGE)
     elif a.record_start:save(a.record_start/"watchdog.json",dict(monotonic_ns=time.monotonic_ns(),work_minutes=280,upload_minutes=10))
     elif a.record_host:record_host(a.record_host)
     elif a.hash_artifacts:hash_artifacts(a.hash_artifacts)

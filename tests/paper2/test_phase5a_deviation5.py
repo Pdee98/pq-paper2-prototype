@@ -165,9 +165,13 @@ class Deviation5(unittest.TestCase):
             cells=[dict(dispatcher_utilisation=.1)],excluded_cells=[],code_commit="b",source_run_id="1")
         result=dict(run_id="r0",cell_id=0,replicate=0,input_sha256="a",code_commit="b",source_run_id="1",
             prototype=dict(validity=dict(passed=False,idle_fraction=.06,p99_dispatch_gap_ns=2000000)))
-        with patch.object(replay,"compare",side_effect=AssertionError("invalid run compared")):
+        from src.paper2.prototype import g3_decision
+        with patch.object(g3_decision,"compare",side_effect=AssertionError("invalid run compared")) as comparison:
             r=replay.gather_records(index,[result])
-        self.assertEqual(r["status"],"invalid");self.assertEqual(r["invalid_runs"],["r0"])
+        comparison.assert_not_called()
+        # Deviation 8 D2: no invariant/band failures; fewer than three valid comparisons is INCONCLUSIVE.
+        self.assertEqual(r["status"],"inconclusive");self.assertEqual(r["invalid_runs"],["r0"])
+        self.assertEqual(r["failures"],[])
         self.assertNotIn("primary",r["per_repetition"][0])
 
     def test_diagnostic_v2_retains_workload_identity_and_stop_rules(self):

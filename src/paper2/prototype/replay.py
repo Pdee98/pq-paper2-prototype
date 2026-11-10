@@ -77,9 +77,9 @@ def audit_file(path):
 def seal(directory,name,extra=None):
     directory=Path(directory)
     files=[dict(path=p.relative_to(directory).as_posix(),sha256=sha256_file(p))
-           for p in sorted(directory.rglob("*")) if p.is_file() and p.name not in (name,name+".sha256")]
+           for p in sorted(directory.rglob("*")) if p.is_file() and p not in (directory/name,directory/(name+".sha256"))]
     manifest=dict(schema=SCHEMA,files=files,**(extra or {}))
-    if name=='RESULT_MANIFEST.json':
+    if name=='RESULT_MANIFEST.json' and 'provenance' not in manifest:
         from .replay_progress import result_provenance
         # Read any existing receipt before replacing the manifest.
         manifest['provenance']=result_provenance(directory)
@@ -103,15 +103,20 @@ def verify_files(directory,name):
     return data
 
 
-def initialize(root,cells,excluded,code_commit,source_run_id):
+def cell_map(index):
+    return dict(zip(index.get("cell_ids",range(len(index["cells"]))),index["cells"]))
+
+
+def initialize(root,cells,excluded,code_commit,source_run_id,cell_ids=None):
     root=Path(root)
     if root.exists():raise FileExistsError("replay input root must be new")
     if not re.fullmatch(r"[0-9a-f]{40}",code_commit):raise ValueError("full source bundle commit required")
     root.mkdir(parents=True)
     runs=[dict(run_id=('secondary-regime' if cell.get('role')=='secondary' else f"cell{i}-r{rep}"),cell_id=i,replicate=rep,manifest_sha256=None)
-          for i,cell in enumerate(cells) if cell["dispatcher_utilisation"]<=.5 for rep in range(1 if cell.get('role')=='secondary' else 3)]
+          for i,cell in zip(cell_ids if cell_ids is not None else range(len(cells)),cells) if cell["dispatcher_utilisation"]<=.5 for rep in range(1 if cell.get('role')=='secondary' else 3)]
     index=dict(schema=SCHEMA,code_commit=code_commit,source_run_id=str(source_run_id),
                cells=cells,excluded_cells=excluded,runs=runs,status="prototype collection in progress")
+    if cell_ids is not None:index["cell_ids"]=list(cell_ids)
     write_index(root,index)
     return index
 
@@ -127,16 +132,22 @@ def verify_index(root,source_run_id=None,complete=True):
     if sha256_file(root/"INDEX.json")!=(root/"INDEX.sha256").read_text().strip():raise ValueError("replay index SHA-256 mismatch")
     if index["schema"]!=SCHEMA or not re.fullmatch(r"[0-9a-f]{40}",index["code_commit"]):raise ValueError("invalid replay index provenance")
     if source_run_id is not None and index["source_run_id"]!=str(source_run_id):raise ValueError("source run identity mismatch")
-    expected={('secondary-regime' if c.get('role')=='secondary' else f"cell{i}-r{r}"):(i,r) for i,c in enumerate(index["cells"]) if c["dispatcher_utilisation"]<=.5 for r in range(1 if c.get('role')=='secondary' else 3)}
+    cells=cell_map(index)
+    if len(cells)!=len(index['cells']) or any(isinstance(i,bool) or not isinstance(i,int) or i<0 for i in cells):raise ValueError('invalid global cell identities')
+    followup=index.get('followup_cells',[])
+    if len(set(followup))!=len(followup) or any(isinstance(i,bool) or not isinstance(i,int) or i not in cells or cells[i].get('role')=='secondary' for i in followup):raise ValueError('invalid follow-up cell list')
+    expected={('secondary-regime' if c.get('role')=='secondary' else f"cell{i}-r{r}"):(i,r) for i,c in cells.items() if c["dispatcher_utilisation"]<=.5 for r in range(1 if c.get('role')=='secondary' else (4 if i in followup else 3))}
     excluded=[dict(cell=c,reason=EXCLUSION) for c in index["cells"] if c["dispatcher_utilisation"]>.5]
     if index["excluded_cells"]!=excluded:raise ValueError("exclusion/guard mismatch")
-    if not expected or len(index["runs"])!=len(expected):raise ValueError("missing/duplicate expected repetitions")
+    required={rid for rid,(i,rep) in expected.items() if cells[i].get('role')!='secondary'}
+    actual={r['run_id'] for r in index['runs']}
+    if not expected or len(actual)!=len(index['runs']) or not required<=actual or not actual<=set(expected):raise ValueError('missing/duplicate expected repetitions')
     seen=set()
     for run in index["runs"]:
         rid=run["run_id"]
         if rid in seen or expected.get(rid)!=(run["cell_id"],run["replicate"]):raise ValueError("unexpected replay repetition")
         seen.add(rid)
-        if complete and not re.fullmatch(r"[0-9a-f]{64}",run.get("manifest_sha256") or ""):
+        if complete and cells[run['cell_id']].get('role')!='secondary' and not re.fullmatch(r"[0-9a-f]{64}",run.get("manifest_sha256") or ""):
             raise ValueError("missing replay repetition: "+rid)
     if complete and index["status"]!=PENDING:raise ValueError("prototype collection is incomplete")
     return index
@@ -224,7 +235,7 @@ def packet(root,index,run):
     if sha256_file(directory/"REPLAY_MANIFEST.json")!=run["manifest_sha256"]:raise ValueError("repetition manifest SHA-256 mismatch")
     verify_files(directory,"REPLAY_MANIFEST.json")
     info=read(directory/"info.json")
-    if info["source_commit"]!=index["code_commit"] or info["cell"]!=index["cells"][run["cell_id"]] or info["replicate"]!=run["replicate"]:
+    if info["source_commit"]!=index["code_commit"] or info["cell"]!=cell_map(index)[run["cell_id"]] or info["replicate"]!=run["replicate"]:
         raise ValueError("repetition provenance mismatch")
     return directory,info
 
@@ -235,7 +246,12 @@ def verify(root,source_run_id=None):
     index=verify_index(root,source_run_id)
     allowed={"INDEX.json","INDEX.sha256"}
     if checksums is not None:allowed.add('SHA256SUMS')
+    for receipt in index.get('source_receipts',[]):
+        file=safe_file(root,receipt['path'])
+        if sha256_file(file)!=receipt['sha256']:raise ValueError('source receipt checksum mismatch')
+        allowed.add(receipt['path'])
     for run in index["runs"]:
+        if cell_map(index)[run['cell_id']].get('role')=='secondary' and not run.get('manifest_sha256'):continue
         directory,info=packet(root,index,run)
         if info.get('public_corpus_ref'):
             reference=safe_file(root,info['public_corpus_ref']);public_corpus.validate_archive(reference,info['public_corpus'])
@@ -335,7 +351,7 @@ def execute(root,run_id,output,source_run_id=None):
     if output.resolve()==ROOT or ROOT in output.resolve().parents:raise ValueError("replay outputs must be outside checkout")
     output.mkdir(parents=True,exist_ok=owns_output(output))
     result=dict(run_id=run_id,cell_id=run["cell_id"],replicate=run["replicate"],cell=info["cell"],
-        code_commit=index["code_commit"],source_run_id=index["source_run_id"],input_sha256=run["manifest_sha256"],
+        code_commit=index["code_commit"],source_run_id=run.get("source_run_id",index["source_run_id"]),input_sha256=run["manifest_sha256"],
         seeds=info["seeds"])
     try:
         result["prototype"]=stage("prototype post-processing",postprocess_prototype,directory,output/"prototype-check")
@@ -356,66 +372,14 @@ def execute(root,run_id,output,source_run_id=None):
 
 
 def gather_records(index,records):
-    failures=[];table=[];invalid=[];expected={r["run_id"]:r for r in index["runs"]};seen=set()
-    for result in records:
-        rid=result.get("run_id");run=expected.get(rid)
-        if run is None or rid in seen:
-            failures.append(dict(run_id=rid,check="unexpected/duplicate repetition"));continue
-        seen.add(rid)
-        for name,value in (("input_sha256",run["manifest_sha256"]),("code_commit",index["code_commit"]),
-                           ("source_run_id",index["source_run_id"]),("cell_id",run["cell_id"]),("replicate",run["replicate"])):
-            if result.get(name)!=value:failures.append(dict(run_id=rid,check=name+" mismatch"))
-        row=dict(run_id=rid,cell_id=run["cell_id"],replicate=run["replicate"])
-        if index['cells'][run['cell_id']].get('role')=='secondary':
-            from .cycle_protocol import regime_category
-            row.update(role='secondary',category=regime_category(result.get('prototype',{}).get('metrics',{}).get('block_tx_cache_hit_rate'),result.get('primary',{}).get('metrics',{}).get('block_tx_cache_hit_rate')),
-                prototype_hit=result.get('prototype',{}).get('metrics',{}).get('block_tx_cache_hit_rate'),simulation_hit=result.get('primary',{}).get('metrics',{}).get('block_tx_cache_hit_rate'))
-            for name in ('prototype','primary','held_out'):
-                if result.get(name,{}).get('violations'):row.setdefault('diagnostic_errors',[]).append(dict(source=name,violations=result[name]['violations']))
-            if result.get('execution_error'):row['diagnostic_errors']=[result['execution_error']]
-            table.append(row);continue
-        if result.get("execution_error"):failures.append(dict(run_id=rid,check="execution",detail=result["execution_error"]))
-        validity=result.get("prototype",{}).get("validity")
-        row["prototype_validity"]=validity
-        if not isinstance(validity,dict) or not validity.get("passed"):
-            invalid.append(rid);row["status"]="INVALID: prototype validity guard"
-            failures.append(dict(run_id=rid,check="prototype validity",validity=validity))
-            table.append(row);continue
-        try:
-            primary=compare(result["prototype"]["metrics"],result["primary"]["metrics"])
-            held=compare(result["prototype"]["metrics"],result["held_out"]["metrics"],diagnostic=True)
-            row.update(primary=primary,held_out=held)
-            for name,item in primary["checks"].items():
-                if not item["passed"]:failures.append(dict(run_id=rid,check=name,**item))
-            if not result["prototype"]["metrics"]["complete"] or not result["primary"]["metrics"]["complete"]:
-                failures.append(dict(run_id=rid,check="incomplete primary/prototype"))
-            for name in ("prototype","primary","held_out"):
-                for violation in result[name]["violations"]:failures.append(dict(run_id=rid,check=name+" invariant",violation=violation))
-        except (KeyError,TypeError) as exc:failures.append(dict(run_id=rid,check="missing result fields",detail=str(exc)))
-        table.append(row)
-    for rid in sorted(expected.keys()-seen):failures.append(dict(run_id=rid,check="missing repetition"))
-    aggregates=[]
-    for cell_id,cell in enumerate(index["cells"]):
-        if cell.get('role')=='secondary':continue
-        if cell["dispatcher_utilisation"]>.5:continue
-        members=[r for r in table if r["cell_id"]==cell_id and "primary" in r]
-        aggregate=dict(cell_id=cell_id,cell=cell,repetitions=len(members),metrics={})
-        for name in BANDS:
-            aggregate["metrics"][name]={kind:statistics.fmean(r["primary"]["checks"][name][kind] for r in members)
-                if members and all(r["primary"]["checks"][name][kind] is not None for r in members) else None
-                for kind in ("prototype","simulation")}
-        aggregate["passed"]=len(members)==3 and not any(f.get("run_id") in {r["run_id"] for r in members} for f in failures)
-        aggregates.append(aggregate)
-    return dict(status="invalid" if invalid else "passed" if expected and not failures else "failed",invalid_runs=invalid,failures=failures,
-        secondary_regime=[r for r in table if r.get('role')=='secondary'],
-        per_repetition=sorted(table,key=lambda r:r["run_id"]),aggregates=aggregates,excluded_cells=index["excluded_cells"],
-        bands=BANDS,source_run_id=index["source_run_id"],code_commit=index["code_commit"])
+    from .g3_decision import gather_records as decide
+    return decide(index,records)
 
 
 def gather(root,results,output,source_run_id=None):
-    output=Path(output)
+    output=Path(output);results=Path(results)
     if output.resolve()==ROOT or ROOT in output.resolve().parents:raise ValueError("gather outputs must be outside checkout")
-    output.mkdir(parents=True,exist_ok=True);errors=[];records=[]
+    output.mkdir(parents=True,exist_ok=True);errors=[];records=[];index=None
     try:
         index=verify_index(root,source_run_id,complete=False)
         if os.environ.get("GITHUB_ACTIONS")=="true" and _git_state()["commit"]!=index["code_commit"]:
@@ -434,10 +398,24 @@ def gather(root,results,output,source_run_id=None):
                 records.append(result)
             except (OSError,ValueError,KeyError) as exc:errors.append(dict(check="result checksum/schema",path=path.parent.name,detail=str(exc)))
         report=gather_records(index,records);report["failures"].extend(errors)
-        if errors:report["status"]="failed"
+        if errors:report.update(status="failed",verdict="FAIL")
     except (OSError,ValueError,KeyError) as exc:
-        report=dict(status="failed",failures=[dict(check="input checksum/schema",detail=str(exc))],per_repetition=[],aggregates=[],excluded_cells=[])
+        report=dict(status="failed",verdict="FAIL",failures=[dict(check="input checksum/schema",detail=str(exc))],per_repetition=[],aggregates=[],excluded_cells=[])
+    for path in results.rglob('result.json'):
+        try:
+            data=read(path);verify_files(path.parent,'RESULT_MANIFEST.json')
+            destination=safe_file(output,'cells/'+data['run_id'])
+            shutil.copytree(path.parent,destination)
+        except (OSError,ValueError,KeyError):
+            # Errors remain in the aggregate; never authenticate an unchecked copy.
+            pass
     save(output/"G3_STATUS.json",report)
+    if index is not None:
+        shutil.copyfile(Path(root)/'INDEX.json',output/'INPUT_INDEX.json')
+        shutil.copyfile(Path(root)/'INDEX.sha256',output/'INPUT_INDEX.sha256')
+        for receipt in index.get('source_receipts',[]):
+            source=safe_file(root,receipt['path']);destination=safe_file(output,receipt['path'])
+            destination.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(source,destination)
     lines=["# G3 deterministic replay outcome","","Status: "+report["status"],"",
            "| Run | Metric | Prototype | Primary | Error | Limit | Passed | Held-out error (diagnostic) |",
            "| --- | --- | --- | --- | --- | --- | --- | --- |"]
@@ -452,7 +430,24 @@ def gather(root,results,output,source_run_id=None):
                   "","## Deviation 2 exclusions","",json.dumps(report["excluded_cells"],indent=2),
                   "","## Every failing check","",json.dumps(report["failures"],indent=2)))
     (output/"G3_REPORT.md").write_bytes(("\n".join(lines)+"\n").encode())
+    seal_aggregate(output,report.get('code_commit'))
     return report
+
+
+def seal_aggregate(output,source_commit):
+    from .replay_progress import checkout_receipt
+    seal(output,'RESULT_MANIFEST.json',dict(provenance=dict(source_code_commit=source_commit,**checkout_receipt())))
+    return verify_aggregate(output,source_commit)
+
+
+def verify_aggregate(output,source_commit=None):
+    output=Path(output)
+    if not (output/'RESULT_MANIFEST.json').is_file():raise ValueError('aggregate is unsealed')
+    manifest=verify_files(output,'RESULT_MANIFEST.json')
+    receipt=manifest.get('provenance',{})
+    if not all(k in receipt for k in ('source_code_commit','replay_code_commit','replay_tree_clean')):raise ValueError('aggregate provenance missing')
+    if source_commit is not None and receipt['source_code_commit']!=source_commit:raise ValueError('aggregate source commit mismatch')
+    return manifest
 
 
 def main():
@@ -465,7 +460,7 @@ def main():
     verify_checksums(args.inputs)
     if args.command=="prepare":
         index=verify(args.inputs,args.source_run_id)
-        matrix=json.dumps(dict(include=[matrix_entry(args.inputs,r["run_id"]) for r in index["runs"]]),separators=(",",":"))
+        matrix=json.dumps(dict(include=[matrix_entry(args.inputs,r["run_id"]) for r in index["runs"] if r.get("manifest_sha256")]),separators=(",",":"))
         print(matrix)
         if os.environ.get("GITHUB_OUTPUT"):
             with open(os.environ["GITHUB_OUTPUT"],"a",encoding="utf-8") as stream:
@@ -473,7 +468,7 @@ def main():
     elif args.command=="run":
         result=execute(args.inputs,args.run_id,args.output,args.source_run_id)
         index=verify_index(args.inputs,args.source_run_id)
-        raise SystemExit(0 if gather_records(dict(index,runs=[r for r in index["runs"] if r["run_id"]==args.run_id]),[result])["status"]=="passed" else 1)
+        raise SystemExit(1 if result.get("execution_error") else 0)
     else:raise SystemExit(0 if gather(args.inputs,args.results,args.output,args.source_run_id)["status"]=="passed" else 1)
 
 

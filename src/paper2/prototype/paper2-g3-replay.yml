@@ -3,8 +3,12 @@ on:
   workflow_dispatch:
     inputs:
       source_run_id:
-        description: ARM measurement workflow run ID
+        description: XMSS 7X source run ID (or the diagnostic source)
         required: true
+        type: string
+      ml_dsa_source_run_id:
+        description: ML-DSA 7M source run ID; required for validation
+        required: false
         type: string
       source_kind:
         description: Validation or excluded diagnostic evidence
@@ -25,6 +29,7 @@ jobs:
     env:
       PYTHONDONTWRITEBYTECODE: '1'
       SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+      SOURCE_ML_DSA_RUN_ID: ${{ inputs.ml_dsa_source_run_id }}
       REPLAY_MODULE: ${{ inputs.source_kind == 'diagnostic' && 'src.paper2.prototype.diagnostic' || 'src.paper2.prototype.replay' }}
     steps:
       - name: Set runner-temp paths
@@ -38,7 +43,18 @@ jobs:
           name: paper2-g3-${{ inputs.source_kind == 'diagnostic' && 'diagnostic' || 'replay' }}-inputs-${{ inputs.source_run_id }}
           run-id: ${{ inputs.source_run_id }}
           github-token: ${{ github.token }}
-          path: ${{ runner.temp }}/inputs
+          path: ${{ runner.temp }}/${{ inputs.source_kind == 'diagnostic' && 'inputs' || 'source-x' }}
+      - name: Download second validation source (7M)
+        if: inputs.source_kind == 'validation'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: paper2-g3-replay-inputs-${{ inputs.ml_dsa_source_run_id }}
+          run-id: ${{ inputs.ml_dsa_source_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/source-m
+      - name: Verify same-commit completed 7X and 7M sources and form strict union
+        if: inputs.source_kind == 'validation'
+        run: python -m src.paper2.prototype.split_replay --xmss "$RUNNER_TEMP/source-x" --ml-dsa "$RUNNER_TEMP/source-m" --xmss-run-id "$SOURCE_RUN_ID" --ml-dsa-run-id "$SOURCE_ML_DSA_RUN_ID" --output "$RUNNER_TEMP/inputs"
       - name: Verify all inputs and generate exact eligible-run matrix
         id: inputs
         run: python -m "$REPLAY_MODULE" prepare --inputs "$RUNNER_TEMP/inputs" --source-run-id "$SOURCE_RUN_ID"
@@ -53,6 +69,7 @@ jobs:
     env:
       PYTHONDONTWRITEBYTECODE: '1'
       SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+      SOURCE_ML_DSA_RUN_ID: ${{ inputs.ml_dsa_source_run_id }}
       REPLAY_MODULE: ${{ inputs.source_kind == 'diagnostic' && 'src.paper2.prototype.diagnostic' || 'src.paper2.prototype.replay' }}
       REPLAY_RUN_ID: ${{ matrix.run_id }}
       REPLAY_TIMEOUT_MINUTES: ${{ matrix.timeout_minutes }}
@@ -70,7 +87,18 @@ jobs:
           name: paper2-g3-${{ inputs.source_kind == 'diagnostic' && 'diagnostic' || 'replay' }}-inputs-${{ inputs.source_run_id }}
           run-id: ${{ inputs.source_run_id }}
           github-token: ${{ github.token }}
-          path: ${{ runner.temp }}/inputs
+          path: ${{ runner.temp }}/${{ inputs.source_kind == 'diagnostic' && 'inputs' || 'source-x' }}
+      - name: Download second validation source (7M)
+        if: inputs.source_kind == 'validation'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: paper2-g3-replay-inputs-${{ inputs.ml_dsa_source_run_id }}
+          run-id: ${{ inputs.ml_dsa_source_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/source-m
+      - name: Verify same-commit completed 7X and 7M sources and form strict union
+        if: inputs.source_kind == 'validation'
+        run: python -m src.paper2.prototype.split_replay --xmss "$RUNNER_TEMP/source-x" --ml-dsa "$RUNNER_TEMP/source-m" --xmss-run-id "$SOURCE_RUN_ID" --ml-dsa-run-id "$SOURCE_ML_DSA_RUN_ID" --output "$RUNNER_TEMP/inputs"
       - name: Replay primary and held-out inputs, check invariants and compare
         run: timeout --signal=TERM --kill-after=30s "$((REPLAY_TIMEOUT_MINUTES - 5))m" python -m "$REPLAY_MODULE" run --inputs "$RUNNER_TEMP/inputs" --source-run-id "$SOURCE_RUN_ID" --run-id "$REPLAY_RUN_ID" --output "$RUNNER_TEMP/result"
       - name: Preserve flushed replay progress, including timeout evidence
@@ -96,6 +124,7 @@ jobs:
     env:
       PYTHONDONTWRITEBYTECODE: '1'
       SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+      SOURCE_ML_DSA_RUN_ID: ${{ inputs.ml_dsa_source_run_id }}
       REPLAY_MODULE: ${{ inputs.source_kind == 'diagnostic' && 'src.paper2.prototype.diagnostic' || 'src.paper2.prototype.replay' }}
     steps:
       - name: Set runner-temp paths
@@ -112,7 +141,18 @@ jobs:
           name: paper2-g3-${{ inputs.source_kind == 'diagnostic' && 'diagnostic' || 'replay' }}-inputs-${{ inputs.source_run_id }}
           run-id: ${{ inputs.source_run_id }}
           github-token: ${{ github.token }}
-          path: ${{ runner.temp }}/inputs
+          path: ${{ runner.temp }}/${{ inputs.source_kind == 'diagnostic' && 'inputs' || 'source-x' }}
+      - name: Download second validation source (7M)
+        if: inputs.source_kind == 'validation'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: paper2-g3-replay-inputs-${{ inputs.ml_dsa_source_run_id }}
+          run-id: ${{ inputs.ml_dsa_source_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/source-m
+      - name: Verify same-commit completed 7X and 7M sources and form strict union
+        if: inputs.source_kind == 'validation'
+        run: python -m src.paper2.prototype.split_replay --xmss "$RUNNER_TEMP/source-x" --ml-dsa "$RUNNER_TEMP/source-m" --xmss-run-id "$SOURCE_RUN_ID" --ml-dsa-run-id "$SOURCE_ML_DSA_RUN_ID" --output "$RUNNER_TEMP/inputs"
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         continue-on-error: true
         with:
