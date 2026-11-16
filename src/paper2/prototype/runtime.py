@@ -18,6 +18,7 @@ from .serialisation import CSVWriter, write_json
 from .dispatch_runtime import EvidenceList, SlicedCache
 from .validity import Validity
 from .pause_attribution import PauseRecorder, labelled, CODES, measure_callback_cost
+from .stage_capture import CapturedDispatcher
 
 PROTOTYPE_FIELDS=("monotonic_ns","scheduled_t","dispatcher_span_id","send_ns","receive_ns",
                   "worker_start_ns","worker_end_ns","occupancy_ns","primitive_ns","dispatch_to_start_ns",
@@ -204,7 +205,8 @@ class LegacyRealtimeModel(Model):
                     self.incomplete=True;break
                 poll_begin=time.monotonic_ns()
                 ready=[i for i in self.pool.running if self.workers.pipes[i].poll()]
-                self.ipc_ns+=time.monotonic_ns()-poll_begin
+                poll_end=time.monotonic_ns();self.ipc_ns+=poll_end-poll_begin
+                if hasattr(self,'capture_interval'):self.capture_interval(poll_begin,poll_end,'poll')
                 if ready:
                     for i in ready:self._handle(self._receive,i)
                     continue
@@ -216,7 +218,8 @@ class LegacyRealtimeModel(Model):
                 pipes=[self.workers.pipes[i] for i in self.pool.running]
                 if pipes:wait(pipes,timeout=delay)
                 else:time.sleep(delay)
-                self.idle_ns+=time.monotonic_ns()-begin
+                idle_end=time.monotonic_ns();self.idle_ns+=idle_end-begin
+                if hasattr(self,'capture_interval'):self.capture_interval(begin,idle_end,'loop')
             self.finish_ns=time.monotonic_ns()
             if not self.incomplete and (self.pool.running or self.pool.waiting):
                 raise RuntimeError("unfinished worker jobs")
@@ -324,8 +327,10 @@ class RealtimeModel(LegacyRealtimeModel):
     def _start(self,job,worker):
         payload,signature,public=self.prepared_tx[job.tx_id] if job.tx else self.prepared_blocks[job.block_id]
         job.send_ns=time.monotonic_ns()
+        if hasattr(self,'capture_send'):self.capture_send(job,worker,job.send_ns)
         self.workers.pipes[worker].send(("verify",job.job_id,payload,signature,public))
-        self.ipc_ns+=time.monotonic_ns()-job.send_ns
+        pipe_return=time.monotonic_ns();self.ipc_ns+=pipe_return-job.send_ns
+        if hasattr(self,'capture_pipe_return'):self.capture_pipe_return(pipe_return)
         job.dispatch_to_start_ns=job.send_ns-self.dispatch_ns[job.job_id]
         job.dispatch_decision_ns=self.dispatch_ns[job.job_id]
         job.scheduled_service_unknown=True
@@ -619,7 +624,7 @@ class CompletionFirstModel(PreDeviation5Model):
             **self.validity.report((self.finish_ns-self.epoch)/1e9,final=True))
 
 
-class CycleRealtimeModel(PreDeviation5Model):
+class CycleRealtimeModel(CapturedDispatcher,PreDeviation5Model):
     """Deviation 4 dispatch order; optional diagnostics never slice/reorder work."""
     def __init__(self,*args,**kwargs):
         self.pause_monitor=None
@@ -635,8 +640,8 @@ class CycleRealtimeModel(PreDeviation5Model):
                 base=getattr(self,method).__func__
                 setattr(self,method,MethodType(labelled(label)(base),self))
 
-    def _handle(self,callback,*args):
-        if not self.detailed:return super()._handle(callback,*args)
+    def _captured_handle_body(self,callback,*args):
+        if not self.detailed:return super()._captured_handle_body(callback,*args)
         self.span_id=len(self.spans);begin=time.monotonic_ns();self.marker_ns=begin
         if self.pause_monitor:self.pause_monitor.begin_span(self.span_id,callback.__name__,begin)
         self._log('dispatcher_busy_start')
@@ -658,6 +663,7 @@ class CycleRealtimeModel(PreDeviation5Model):
         self.gc_window=WindowGC(directory,self.pause_monitor)
         own_progress=self.progress is None
         if own_progress:self.progress=Progress(directory)
+        self.capture_open(directory)
         complete=False
         try:
             super().run();complete=True
@@ -684,6 +690,7 @@ class CycleRealtimeModel(PreDeviation5Model):
                     event_rows=self.row_count,q_admission=self.pool.counts()[0],q_block=self.pool.counts()[1],
                     running=len(self.pool.running)))
             if own_progress:self.progress.close()
+            self.capture_close(complete)
 
     def extra_manifest(self,directory):
         value=super().extra_manifest(directory)

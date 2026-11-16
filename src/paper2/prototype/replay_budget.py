@@ -13,13 +13,17 @@ def timeout_minutes(seconds):
     return result
 
 
-def matrix_entry(root,run_id):
+def matrix_entry(root,run_id,models=None):
     from .replay import read,safe_file
     info=read(safe_file(root,run_id)/'info.json')
     budget=json.loads(Path(__file__).with_name('replay-budget.json').read_bytes())
     count=info['arm_corpus_audit']['signature_ids_checked']
     if isinstance(count,bool) or not isinstance(count,int) or count<1:
         raise ValueError('missing positive transaction count for replay projection')
+    if info.get('dispatcher_inputs'):
+        from .deviation9_budget import replay_projection
+        projection=replay_projection(count,models or ('explicit',))
+        return dict(run_id=run_id,timeout_minutes=projection['timeout_minutes'])
     fixed,coefficient=budget['fixed_seconds'],budget['seconds_per_transaction']
     if any(isinstance(v,bool) or not isinstance(v,(int,float)) or not math.isfinite(v) or v<0 for v in (fixed,coefficient)):
         raise ValueError('invalid measured replay budget')

@@ -661,6 +661,9 @@ def _git_state():
 
 def run_model(config, *, model_type=Model) -> tuple[Path, Path]:
     """One finite workload, schema-v4 CSV and provenance JSON outside the repo."""
+    if "dispatcher" in config:
+        from .dispatcher import route
+        config, model_type = route(config, model_type)
     model = model_type(config)
     directory = Path(config.get("output_dir") or tempfile.mkdtemp(prefix="paper2-phase2-")).resolve()
     if directory == ROOT or ROOT in directory.parents:

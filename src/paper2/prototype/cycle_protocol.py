@@ -9,7 +9,8 @@ import math
 
 CLASSES=("admission","block_tx","block_sig")
 RHO_COLD=(.5,.85)
-PROTOTYPE_OPTIONS=('g3_input_version','calibration_cycle_means','diagnostic_instrumentation')
+PROTOTYPE_OPTIONS=('g3_input_version','calibration_cycle_means','diagnostic_instrumentation',
+                   'stage_capture','stage_capture_capacity','stage_capture_window')
 
 
 def model_config(config):

@@ -27,8 +27,12 @@ class CycleProtocol(unittest.TestCase):
                 with sample.open('w',newline='') as f:w=csv.DictWriter(f,fieldnames=tuple(rows[0]));w.writeheader();w.writerows(rows)
                 if cycle:calls.append(dict(k=k,rep=rep,iteration=iteration,traffic_rate=args[4]))
                 return dict(k=k,throughput=1000*k,samples=str(sample),dispatcher_per_tx=.00001)
-            with patch('src.paper2.prototype.runner.fresh',side_effect=fresh):
+            # This test isolates the unchanged window/replacement protocol;
+            # its synthetic CSV-only workers do not generate stage captures.
+            # Empirical input integrity is exercised by the Phase E fixtures.
+            with patch('src.paper2.prototype.runner.fresh',side_effect=fresh),patch('src.paper2.prototype.dispatcher_tables.build') as cost_tables:
                 refs=cycle_calibration.calibrate_backend('sleep',root/'unused.json',root)
+            self.assertEqual(cost_tables.call_count,4)  # final window x 2 slots x 2 k
             self.assertEqual(len(calls),12)
             session=json.loads((root/'calibration/sleep-cycle-session.json').read_text())
             self.assertEqual([w['iteration'] for w in session['windows']],[0,1,0,1])

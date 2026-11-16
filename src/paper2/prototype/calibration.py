@@ -11,6 +11,7 @@ from .workers import Workers
 from .runtime import run
 from .analysis import distribution,costs
 from src.paper2.verify.invariants import check
+from .stage_capture import Recorder,Boundaries,measure_cost,audit,E,F,S
 
 
 def calibrate_once(corpus_path,k,output,replicate,warmup=2,measurement=10,diagnostic=False):
@@ -30,19 +31,29 @@ def calibrate_once(corpus_path,k,output,replicate,warmup=2,measurement=10,diagno
     sampler=MemorySampler(progress,output,[p.pid for p in workers.processes])
     samples=[];running={};serial=0;decision=[];spans=[]
     epoch=None;end=(warmup+measurement)*1e9
+    import platform
+    capture=Recorder(output,4_000_000,dict(window='occupancy',backend=backend,k=k,replicate=replicate,
+        host=platform.node(),calibration_only=True),cost=measure_cost(output))
+    boundaries=Boundaries(capture)
     def dispatch(worker):
         nonlocal serial
         begin=time.monotonic_ns();cls,parts=fixed[serial%len(fixed)];identity=str(serial);serial+=1
+        # Numeric serial is its job identity; no per-job string catalog allocation.
+        boundaries.begin(begin,F['send'],S['send_pre'],job=int(identity),worker=worker)
         # Selection time is a diagnostic, not a substitute for Model decision costs.
         decision.append(time.monotonic_ns()-begin)
-        send=time.monotonic_ns();workers.pipes[worker].send(("verify",identity,*parts))
+        send=time.monotonic_ns();boundaries.record(send,E['send']);boundaries.change(send,S['send_tail'])
+        workers.pipes[worker].send(("verify",identity,*parts))
+        returned=time.monotonic_ns();boundaries.record(returned,E['pipe_return']);boundaries.end(returned)
         running[worker]=(identity,cls,send)
+    complete=False
     try:
         control.enter();epoch=time.monotonic_ns();progress.phase('epoch',epoch_ns=epoch)
         for worker in range(k):dispatch(worker)
         while running:
             sampler.sample()
-            ready=wait([workers.pipes[w] for w in running],timeout=15)
+            begin=time.monotonic_ns();ready=wait([workers.pipes[w] for w in running],timeout=15)
+            returned=time.monotonic_ns();capture.idle_interval(begin,returned,'poll')
             if not ready:raise TimeoutError("concurrency calibration worker stalled")
             for worker in list(running):
                 pipe=workers.pipes[worker]
@@ -50,21 +61,33 @@ def calibrate_once(corpus_path,k,output,replicate,warmup=2,measurement=10,diagno
                 span_begin=time.monotonic_ns()
                 if diagnostic:monitor.begin_span(len(spans),'_receive',span_begin)
                 reply=pipe.recv();receive=time.monotonic_ns();identity,cls,send=running.pop(worker)
+                # Transport before abstract receive is separate from post-receive work.
+                capture.idle_interval(span_begin,receive,'poll')
+                boundaries.begin(receive,F['completion_'+cls],S['complete_'+cls],job=int(identity),worker=worker)
+                boundaries.record(receive,E['receive'])
                 if reply[0]!="result" or reply[1]!=identity or not reply[4]:
                     raise RuntimeError("fixed valid corpus failed verification")
                 _,_,start,finish,_=reply
                 samples.append(dict(backend=backend+":"+cls,operation="verify",variant="valid",
                     duration_ns=receive-send,primitive_ns=finish-start,job_class=cls,
+                    job_id=identity,worker_id=worker,
                     source=f"concurrency-k{k}-rep{replicate}",send_ns=send-epoch,receive_ns=receive-epoch))
+                boundaries.record(time.monotonic_ns(),E['group_end']);boundaries.change(time.monotonic_ns(),S['complete_tail'])
                 if receive-epoch<end:dispatch(worker)
+                boundaries.end(time.monotonic_ns())
                 if diagnostic:
                     span_end=time.monotonic_ns();monitor.end_span(span_end)
                     spans.append(dict(id=len(spans),kind='_receive',start_ns=span_begin,end_ns=span_end,
                                       start_t=(span_begin-epoch)/1e9,end_t=(span_end-epoch)/1e9))
         progress.phase('drain_end',running=0)
         control.leave();workers.handshake("after")
+        complete=True
     finally:
         control.leave(partial=True);workers.close();monitor.finish(partial=bool(running));progress.close()
+        capture.finish(complete,boundaries.busy_ns)
+    partition=audit(output)
+    if not partition['passed']:raise ValueError('INVALID: occupancy stage partition audit failed')
+    (output/'stage-partition.json').write_text(json.dumps(partition,indent=2))
     if diagnostic:
         from .serialisation import write_json
         write_json(output/'dispatcher_spans.json',spans)
@@ -82,7 +105,8 @@ def calibrate_once(corpus_path,k,output,replicate,warmup=2,measurement=10,diagno
     for policy in ("fifo","block_priority"):
         config=dict(corpus["workload"],k=k,policy=dict(name=policy),q_max=10000,
             cache=dict(capacity=4096,ttl=2*corpus["workload"]["block_period"]),
-            pool=dict(enabled=True,capacity_bytes=16*1024*1024),diagnostic_instrumentation=diagnostic,output_dir=str(output/("dispatcher-"+policy)))
+            pool=dict(enabled=True,capacity_bytes=16*1024*1024),diagnostic_instrumentation=diagnostic,
+            stage_capture_window='dispatcher-probe',output_dir=str(output/("dispatcher-"+policy)))
         from src.paper2.model.service_times import sha256_file
         e,m=run(config,corpus_path,validated_sha256=sha256_file(Path(corpus_path)))
         violations=check(e,e.parent/"jobs.csv",m)

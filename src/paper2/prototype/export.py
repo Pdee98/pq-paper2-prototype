@@ -124,7 +124,9 @@ def export(destination,allow_dirty=False):
     records.append(dict(path=target.name,origin_path="research/paper2/phase0/protected_sha256.txt",
                         sha256=sha256_file(target),frozen=False))
     workflow_lints={}
-    for template_path in sorted((ROOT/"src/paper2/prototype").glob("paper2-g3*.yml")):
+    templates=list((ROOT/"src/paper2/prototype").glob("paper2-g3*.yml"))
+    templates.append(ROOT/"src/paper2/prototype/paper2-arm-disk-probe.yml")
+    for template_path in sorted(templates):
         workflow=".github/workflows/"+template_path.name;target=destination/workflow;target.parent.mkdir(parents=True,exist_ok=True)
         template=template_path.read_text()
         target.write_bytes(template.replace("research/paper2/phase5/RUNTIME_PLAN.md ","").encode())

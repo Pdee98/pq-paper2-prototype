@@ -235,6 +235,14 @@ def create_packet(directory,config,corpus_path,prototype,held_out,cell,replicate
                                if primary is not None else 'historical Deviation 6 identical comparison slots')
         save(directory/'info.json',info)
     else:samples_from_jobs(originals["prototype/jobs.csv"],directory/"primary.csv",doc["backend"],"validation")
+    empirical={slot:cell.get(slot+'_dispatcher_tables') for slot in ('primary','held_out')}
+    if any(empirical.values()):
+        if not all(empirical.values()):raise ValueError('both dispatcher cost slots required')
+        # Keep the single canonical evidence copy in calibration/control;
+        # packet binding contains its immutable seals, not duplicate captures.
+        seal(directory,'REPLAY_MANIFEST.json')
+        from .empirical_replay import bind
+        bind(directory,empirical)
     for path in directory.rglob("*"):
         if path.is_file():audit_file(path)
     seal(directory,"REPLAY_MANIFEST.json")
@@ -357,6 +365,8 @@ def execute(root,run_id,output,source_run_id=None):
     run=next((r for r in index["runs"] if r["run_id"]==run_id),None)
     if run is None:raise ValueError("unknown replay repetition")
     directory,info=stage("input packet verification",packet,root,index,run)
+    if info.get('dispatcher_inputs'):
+        raise ValueError('empirical packet requires explicit replay purpose and sealed mechanism selection; use empirical_replay.execute_from_index')
     record_source_commit(index['code_commit'])
     if output.exists() and not owns_output(output):raise FileExistsError("replay outputs must be new")
     if output.resolve()==ROOT or ROOT in output.resolve().parents:raise ValueError("replay outputs must be outside checkout")

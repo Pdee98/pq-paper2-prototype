@@ -11,11 +11,15 @@ from pathlib import Path
 
 def check(events_csv, jobs_csv, manifest):
     """Return diagnostic dictionaries; input files are the only source of state."""
-    with Path(events_csv).open(encoding="utf-8", newline="") as f:
-        rows = list(csv.DictReader(f))
+    data = json.loads(Path(manifest).read_text(encoding="utf-8"))
+    if data.get('dispatcher',{}).get('mode')=='explicit':
+        from .streaming import CSVRows
+        rows=CSVRows(events_csv)
+    else:
+        with Path(events_csv).open(encoding="utf-8", newline="") as f:
+            rows = list(csv.DictReader(f))
     with Path(jobs_csv).open(encoding="utf-8", newline="") as f:
         records = [json.loads(r["record"]) for r in csv.DictReader(f)]
-    data = json.loads(Path(manifest).read_text(encoding="utf-8"))
     errors = []
     def bad(code, message, **context):
         errors.append(dict(code=code, message=message, **context))
@@ -26,6 +30,11 @@ def check(events_csv, jobs_csv, manifest):
     if len(jobs) != len(records):
         bad("job_identity", "duplicate physical/logical job record")
     cfg, blocks = data["config"], data["blocks"]
+    explicit = None
+    if data.get("dispatcher", {}).get("mode") == "explicit":
+        from .explicit import inspect
+        explicit = inspect(rows, records, data, manifest)
+        errors.extend(explicit.errors)
     identity_mode = cfg.get("prototype", {}).get("mode")
     real = identity_mode == "real-time-v1"
     real_identity = identity_mode in ("real-time-v1", "real-byte-simulation-v1", "precomputed-key-replay-v1")
@@ -69,7 +78,8 @@ def check(events_csv, jobs_csv, manifest):
                 bad("block_deadline", "event deadline differs from arrival plus configured deadline", row=i, block_id=bid)
         if event == "drop" and row["detail"] == "queue_capacity":
             admission_waiting = sum(c == "admission" for c in waiting.values())
-            free = [w for w in range(k) if w not in active and eligible(w, "admission")]
+            unavailable = explicit.unavailable.get(i, ()) if explicit else ()
+            free = [w for w in range(k) if w not in active and w not in unavailable and eligible(w, "admission")]
             if row["job_class"] != "admission" or admission_waiting != cfg.get("q_max", 1000) or free:
                 bad("tail_drop", "capacity drop without a full admission queue and occupied eligible workers",
                     row=i, t=t, waiting=admission_waiting, free_worker_ids=free)
@@ -79,7 +89,11 @@ def check(events_csv, jobs_csv, manifest):
                 residuals = [max(0, jobs[v]["end_t"]-t) for v in active.values()]
                 ahead = sum(jobs[v]["service_time"] for v, c in waiting.items() if c != "admission")
                 h0[jid] = max(residuals, default=0)+ahead
-            target = direct if any(w not in active and eligible(w, cls) for w in range(k)) else waiting
+            unavailable = explicit.unavailable.get(i, ()) if explicit else ()
+            immediate = any(w not in active and w not in unavailable and eligible(w, cls) for w in range(k))
+            if explicit is not None and explicit.owners.get(i) is None:
+                immediate = False  # declared prepared queue, not an active enqueue callback
+            target = direct if immediate else waiting
             target[jid] = cls
         elif event == "dispatch" and row["chosen_job_id"]:
             chosen = row["chosen_job_id"]
@@ -103,7 +117,8 @@ def check(events_csv, jobs_csv, manifest):
             w = int(row["worker_id"]) if row["worker_id"] else -1
             if w < 0 or w >= k or w in active or not eligible(w, row["job_class"]):
                 bad("worker_ownership", "start without an eligible free worker", t=t, worker=w, job_id=jid)
-            if jid not in selected:
+            prepared = explicit and jid in data["dispatcher"].get("prepared_jobs", {})
+            if jid not in selected and not prepared:
                 bad("queue_recount", "start without a dispatch reservation", job_id=jid)
             selected.pop(jid, None)
             active[w] = jid
@@ -119,8 +134,9 @@ def check(events_csv, jobs_csv, manifest):
             if job is None or not close(t, job["end_t"]) or row["outcome"] != job["outcome"]:
                 bad("job_timing", "end row and job record disagree", job_id=jid)
             if row["outcome"] == "valid" and row["cache_key"]:
-                proofs[row["cache_key"], jid] = t
-                proof_keys[row["cache_key"]] = t
+                published_t = explicit.proof_times.get(jid, math.inf) if explicit else t
+                proofs[row["cache_key"], jid] = published_t
+                proof_keys[row["cache_key"]] = published_t
         elif event == "cache_hit":
             if row["cache_key"] not in proof_keys or proof_keys[row["cache_key"]] > t:
                 bad("cache_safety", "cache hit lacks earlier identical-key success", job_id=jid, t=t)
@@ -145,7 +161,9 @@ def check(events_csv, jobs_csv, manifest):
                 eligible_jobs = [j for j, c in all_waiting.items() if eligible(w, c)]
                 if not eligible_jobs:
                     continue
-                accounted = real and i+1 < len(rows) and covered(busy_spans, t, float(rows[i+1]["t"]))
+                accounted = ((explicit is not None and i+1 < len(rows) and
+                              explicit.covered(t, float(rows[i+1]["t"]))) or
+                             (real and i+1 < len(rows) and covered(busy_spans, t, float(rows[i+1]["t"]))))
                 if not accounted:
                     bad("work_conservation", "idle eligible worker in settled state", t=t,
                         worker_ids=[w], waiting_job_ids=eligible_jobs)
@@ -170,9 +188,13 @@ def check(events_csv, jobs_csv, manifest):
             if jid in h0:
                 wait = job["start_t"]-job["enqueue_t"]
                 overhead = overlap(busy_spans, job["enqueue_t"], job["start_t"]) if real else 0
-                if ((k == 1 and not real and not close(wait, h0[jid])) or
+                if explicit:
+                    overhead = explicit.obstruction(job["enqueue_t"],job["start_t"],records,k)
+                    explicit.h0.append(dict(job_id=jid,wait=wait,physical_bound=h0[jid],control_obstruction=overhead))
+                if ((explicit is not None and wait > h0[jid]+overhead+1e-12) or
+                    (k == 1 and not real and explicit is None and not close(wait, h0[jid])) or
                     (real and (wait < h0[jid]-1e-12 if k == 1 else False)) or
-                    ((k > 1 or real) and wait > h0[jid]+overhead+1e-12)):
+                    (explicit is None and (k > 1 or real) and wait > h0[jid]+overhead+1e-12)):
                     bad("H0", "block wait violates non-preemptive priority residual bound", job_id=jid,
                         wait=wait, bound=h0[jid])
         if job["block_id"] and not job["admission_origin"]:
@@ -215,7 +237,7 @@ def check(events_csv, jobs_csv, manifest):
         if blocks[bid]["deadline_t"] != arrival + cfg.get("deadline", 1):
             bad("block_deadline", "manifest deadline differs from arrival plus configured deadline", block_id=bid)
         expected = cfg["block_times"][i] if cfg.get("block_times") is not None else cfg.get("block_start", 0)+i*cfg.get("block_period", 1)
-        if (not real and arrivals.get(bid) != expected) or (real and arrivals.get(bid, -math.inf) < expected):
+        if (not real and explicit is None and arrivals.get(bid) != expected) or ((real or explicit is not None) and arrivals.get(bid, -math.inf) < expected):
             bad("block_arrival", "block arrival does not match schedule", block_id=bid)
         if bid not in decisions:
             bad("block_decision", "missing block decision", block_id=bid)

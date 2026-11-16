@@ -10,6 +10,8 @@ import statistics
 import subprocess
 import tempfile
 import time
+import os
+import sys
 
 from src.paper2.model import run_model
 from src.paper2.model.service_times import ROOT, CalibrationSamples, WorkloadStream, derive_seed, sha256_file
@@ -24,6 +26,7 @@ PLAN=(("fifo",.3,0),("fifo",.6,0),("block_priority",.2,.2),("block_priority",.4,
 
 def calibration():
     path=ROOT/"results/revision_r1/cross_platform_20261021_130205/imports/calib-ARM64-rep1/calib-aarch64-rep1/raw_samples.csv"
+    if not path.is_file():path=ROOT/'qualification_inputs/G2_CALIBRATION.csv'
     spec=dict(path=str(path),sha256=sha256_file(path),backend="ml_dsa_44",operation="verify",variant="valid")
     samples=CalibrationSamples(spec)
     return spec,statistics.fmean(samples.durations),statistics.fmean(x*x for x in samples.durations)
@@ -73,15 +76,27 @@ def replicate(task):
     return result
 
 
+def physical_cores():
+    if sys.platform=='win32':
+        return int(subprocess.check_output(['powershell','-NoProfile','-Command',
+            '(Get-CimInstance Win32_Processor | Measure-Object NumberOfCores -Sum).Sum'],text=True).strip())
+    affinity=os.sched_getaffinity(0);cores=set()
+    for cpu in affinity:
+        root=Path(f'/sys/devices/system/cpu/cpu{cpu}/topology')
+        cores.add(((root/'physical_package_id').read_text().strip(),(root/'core_id').read_text().strip()))
+    if not cores:raise RuntimeError('cannot determine physical core allocation')
+    return len(cores)
+
+
 def main():
     parser=argparse.ArgumentParser();parser.add_argument("--summary",type=Path,required=True)
     args=parser.parse_args();target=args.summary.resolve()
     if ROOT in target.parents or target.exists():raise ValueError("new external summary required")
     report=ROOT/"research/paper2/phase4/VERIFICATION_REPORT.md"
+    if not report.is_file():report=ROOT/'qualification_inputs/G2_PREREGISTRATION.txt'
     prefix=report.read_bytes().split(b"\n## Execution evidence and gate status",1)[0]
     if hashlib.sha256(prefix).hexdigest()!=PRE_REGISTRATION_SHA256:raise RuntimeError("pre-registration changed")
-    physical=int(subprocess.check_output(["powershell","-NoProfile","-Command",
-        "(Get-CimInstance Win32_Processor | Measure-Object NumberOfCores -Sum).Sum"],text=True).strip())
+    physical=physical_cores()
     if physical<2:raise RuntimeError("physical cores minus one leaves no worker")
     output=dict(pre_registration_sha256=PRE_REGISTRATION_SHA256,physical_cores=physical,workers=min(physical-1,4),
         budget_cpu_seconds=5400,confidence=.99,t_critical=2.756385903670335,replicates_per_condition=30,

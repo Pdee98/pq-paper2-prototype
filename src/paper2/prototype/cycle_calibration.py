@@ -8,6 +8,7 @@ import csv,hashlib,heapq,json,math,statistics,tempfile,time
 from pathlib import Path
 from . import corpus
 from .runtime import PreDeviation5Model,BufferedEventWriter
+from .stage_capture import CapturedDispatcher
 from .analysis import distribution
 from .cycle_protocol import CLASSES
 from src.paper2.workload import generate_workload
@@ -30,7 +31,7 @@ def traffic_workload(rate,duration,run_id,prefix):
     for b in w['blocks']:b.update(block_id=prefix+b['block_id'],tx_ids=[names[t] for t in b['tx_ids']])
     return w
 
-class CalibrationModel(PreDeviation5Model):
+class CalibrationModel(CapturedDispatcher,PreDeviation5Model):
     def __init__(self,config,path,pilot):
         super().__init__(config,path,validated_sha256=sha256_file(path))
         self.fixed={c:[] for c in CLASSES};self.last={};self.samples=[];self.unbacklogged=0;self.sent=0
@@ -71,10 +72,13 @@ class CalibrationModel(PreDeviation5Model):
             previous,waiting=prior
             if waiting:self.samples.append(dict(backend=self.corpus['backend']+':'+previous.job_class,operation='verify',variant='valid',
                 duration_ns=job.send_ns-previous.send_ns,occupancy_ns=previous.occupancy_ns,primitive_ns=previous.primitive_ns,
+                job_id=previous.job_id,
                 job_class=previous.job_class,source=f'concurrency-cycle-k{self.pool.k}-rep{self.config["replicate"]}',worker_id=worker,
                 send_ns=previous.send_ns-self.epoch,next_send_ns=job.send_ns-self.epoch,receive_ns=previous.receive_ns-self.epoch))
             else:self.unbacklogged+=1
-        self.workers.pipes[worker].send(('verify',job.job_id,payload,signature,public));self.ipc_ns+=time.monotonic_ns()-job.send_ns
+        self.capture_send(job,worker,job.send_ns)
+        self.workers.pipes[worker].send(('verify',job.job_id,payload,signature,public))
+        pipe_return=time.monotonic_ns();self.ipc_ns+=pipe_return-job.send_ns;self.capture_pipe_return(pipe_return)
         job.dispatch_to_start_ns=job.send_ns-self.dispatch_ns[job.job_id];job.dispatch_decision_ns=self.dispatch_ns[job.job_id]
         job.scheduled_service_unknown=True;self.t=(job.send_ns-self.epoch)/1e9;self.sent+=1
         from src.paper2.model.engine import Model
@@ -104,8 +108,10 @@ def calibrate_cycle(corpus_path,k,output,replicate,traffic_rate,throughput,warmu
         model=CalibrationModel(cfg,path,pilot);model.stop_t=duration
         model.pause_monitor=PauseRecorder(output,detailed=diagnostic);model.detailed=diagnostic
         model.gc_window=WindowGC(output,model.pause_monitor);model.progress=Progress(output)
+        model.capture_open(output,'representative-cycle')
+        model.stage_capture.metadata.update(warmup=warmup,measurement=measurement)
         if diagnostic:
-            model._handle=MethodType(CycleRealtimeModel._handle,model)
+            model._captured_handle_body=MethodType(CycleRealtimeModel._captured_handle_body,model)
             for name,label in dict(_decide_block='block_state',_receive='receive_result',_dispatch='select_dispatch',
                                    _view='policy_view',_start='send_start',_admit_state='admission_state',
                                    _insert_cache='cache_insert_evidence',_lookup='cache_lookup_ttl',
@@ -116,6 +122,7 @@ def calibrate_cycle(corpus_path,k,output,replicate,traffic_rate,throughput,warmu
         finally:
             model.gc_window.leave(partial=not complete)
             model.pause_monitor.finish(partial=not complete);model.progress.close()
+            model.capture_close(complete)
         if diagnostic:
             from .serialisation import write_json
             with (output/'events.csv').open('x',newline='') as stream:
@@ -186,6 +193,13 @@ def calibrate_backend(backend,path,root,stage_times=None,timeout=1200,diagnostic
         ref=window(0,rate)
         ratios=[max(r['rate']/rate,rate/r['rate']) for r in cold_cycle_loads(ref)]
         if max(ratios)>2:ref=window(1,.8*ref['B_cold_cycle'])
+        from .dispatcher_tables import build,SLOTS
+        selected=windows[-1]['repetitions']
+        for slot,reps in SLOTS.items():
+            directories=[Path(selected[r]['samples']).parent for r in reps]
+            target=root/'dispatcher-costs'/f'{backend}-k{k}'/slot
+            build(directories,slot,target)
+            ref[slot+'_dispatcher_tables']=str(target)
         refs[k]=ref
     runner.save(root/'calibration'/f'{backend}-cycle-session.json',dict(old=old,windows=windows,references=refs,iteration_rule='any planned rho rate differs >2x; at most one replacement'))
     return refs
