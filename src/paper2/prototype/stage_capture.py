@@ -32,6 +32,41 @@ def capacity_bound(config):
 
 class CaptureOverflow(RuntimeError):pass
 
+class CaptureTimings:
+    """Bounded durable observation samples; open count survives process timeout."""
+    def __init__(self,directory,capacity):
+        self.file=(Path(directory)/'capture-timings.bin').open('x+b');self.capacity=capacity;self.count=0
+        self.file.truncate(16+8*capacity);self.map=mmap.mmap(self.file.fileno(),0)
+        struct.pack_into('<QQ',self.map,0,0,capacity)
+    def __len__(self):return self.count
+    def append(self,value):
+        struct.pack_into('<Q',self.map,16+8*self.count,value);self.count+=1
+        struct.pack_into('<Q',self.map,0,self.count)
+    def __iter__(self):
+        for i in range(self.count):yield struct.unpack_from('<Q',self.map,16+8*i)[0]
+    def close(self):
+        self.map.flush();self.map.close();self.file.truncate(16+8*self.count);self.file.close()
+
+def timed_capture(function):
+    """Outer capture operations only; nested calls are counted once."""
+    from functools import wraps
+    @wraps(function)
+    def measured(self,*args,**kwargs):
+        recorder=getattr(self,'recorder',self)
+        if not getattr(recorder,'in_place',False):return function(self,*args,**kwargs)
+        outer=recorder.timing_depth==0;recorder.timing_depth+=1
+        start=time.monotonic_ns() if outer else 0
+        try:return function(self,*args,**kwargs)
+        finally:
+            recorder.timing_depth-=1
+            if outer:
+                elapsed=time.monotonic_ns()-start
+                if len(recorder.timings)>=recorder.timing_limit:
+                    recorder.overflow=True;recorder.preserve('INVALID: capture timer overflow')
+                    raise CaptureOverflow('INVALID: capture timer capacity; evidence preserved')
+                recorder.timings.append(elapsed)
+    return measured
+
 def sha(path):
     h=hashlib.sha256()
     with Path(path).open('rb') as f:
@@ -54,6 +89,16 @@ class Recorder:
         self.jobs=tuple(jobs);self.blocks=tuple(blocks)
         self.job_ids={name:i for i,name in enumerate(self.jobs)};self.block_ids={name:i for i,name in enumerate(self.blocks)}
         self.metadata=dict(metadata);self.cost=cost;self.receipt=None
+        if os.environ.get('PAPER2_CAPTURE_TIMERS')=='1':
+            self.metadata['capture_namespace']='paper2-g3-rehearsal-v2'
+        from array import array
+        self.in_place=os.environ.get('PAPER2_CAPTURE_TIMERS')=='1';self.timing_depth=0
+        self.timing_limit=4*capacity+280*60*1000
+        self.timings=CaptureTimings(self.directory,self.timing_limit) if self.in_place else array('Q')
+        self.timer_overhead=[]
+        if self.in_place:
+            for _ in range(1000):
+                a=time.monotonic_ns();self.timer_overhead.append(time.monotonic_ns()-a)
         self.idle=[-1,0,0,0,0,0];self.last_idle_poll=None;self.zero_progress_polls=0
         self._metadata('OPEN')
 
@@ -69,6 +114,7 @@ class Recorder:
         os.replace(pending,self.directory/'stages.json')
         return value
 
+    @timed_capture
     def append(self,t,event,family,stage=-1,callback=-1,parent=-1,job=-1,block=-1,worker=-1,size=-1,branch=0,qa=0,qb=0,pool=0):
         if self.closed:raise RuntimeError('capture is closed')
         if self.count==self.capacity:
@@ -77,6 +123,7 @@ class Recorder:
         ROW.pack_into(self.map,HEADER.size+self.count*ROW.size,t,event,family,stage,callback,parent,job,block,worker,size,branch,qa,qb,pool)
         self.count+=1;struct.pack_into('<Q',self.map,8,self.count)
 
+    @timed_capture
     def idle_interval(self,start,end,family):
         """Coalesce between root callbacks, keeping poll/wait work disjoint."""
         if family not in ('loop','poll') or end<start:raise ValueError('invalid idle interval')
@@ -107,11 +154,24 @@ class Recorder:
         if self.closed:return self.receipt
         self.flush_idle()
         self.map.flush();self.map.close();self.file.truncate(HEADER.size+self.count*ROW.size);self.file.flush();os.fsync(self.file.fileno());self.file.close();self.closed=True
+        if self.in_place:
+            import math,statistics
+            def summary(values):
+                v=sorted(values);n=len(v)
+                return dict(count=n,mean_ns=statistics.fmean(v) if n else None,p50_ns=statistics.median(v) if n else None,
+                    p95_ns=v[math.ceil(.95*n)-1] if n else None,p99_ns=v[math.ceil(.99*n)-1] if n else None,
+                    max_ns=max(v) if n else None,total_ns=sum(v))
+            self.cost=dict(summary(self.timings),in_place=True,report_only=True,is_overhead_estimate=any(self.timings),
+                scope='outer capture boundary/record/idle operations; nested calls counted once',
+                dispatcher_share=sum(self.timings)/busy_ns if busy_ns else None,timer_overhead=summary(self.timer_overhead),
+                count_bound=self.timing_limit,overhead_subtracted=False,no_uninstrumented_comparator=True)
+            self.timings.close()
         mean=self.cost.get('mean_ns') if self.cost and self.cost.get('is_overhead_estimate',True) else None
+        overhead=self.cost['total_ns'] if self.in_place else self.count*mean if mean is not None else None
         self.receipt=self._metadata('COMPLETE' if complete and not self.overflow else 'INVALID: partial capture',
             overflow=self.overflow,sha256=sha(self.path),bytes=self.path.stat().st_size,
-            estimated_overhead_ns=self.count*mean if mean is not None else None,
-            dispatcher_busy_ns=busy_ns,estimated_overhead_share=self.count*mean/busy_ns if mean is not None and busy_ns>0 else None,
+            estimated_overhead_ns=overhead,
+            dispatcher_busy_ns=busy_ns,estimated_overhead_share=overhead/busy_ns if overhead is not None and busy_ns>0 else None,
             overhead_subtracted=False)
         return self.receipt
 
@@ -186,6 +246,7 @@ class Boundaries:
         self.ids=[-1]*8;self.families=[-1]*8;self.stages=[-1]*8
         self.jobs=[-1]*8;self.blocks=[-1]*8;self.workers=[-1]*8;self.sizes=[-1]*8
 
+    @timed_capture
     def record(self,t,event,job=-1,block=-1,worker=-1,branch=0):
         if not self.depth:return
         i=self.depth-1;qa=qb=pool=0
@@ -195,6 +256,7 @@ class Boundaries:
             job if job>=0 else self.jobs[i],block if block>=0 else self.blocks[i],
             worker if worker>=0 else self.workers[i],self.sizes[i],branch,qa,qb,pool)
 
+    @timed_capture
     def begin(self,t,family,stage,job=-1,block=-1,worker=-1,size=-1):
         if self.depth==len(self.ids):
             self.recorder.overflow=True;self.recorder.preserve('INVALID: capture nesting overflow')
@@ -208,10 +270,12 @@ class Boundaries:
         self.workers[i]=worker;self.sizes[i]=size;self.depth+=1
         self.record(t,E['callback_entry']);self.record(t,E['stage_entry'])
 
+    @timed_capture
     def change(self,t,stage):
         if not self.depth:return
         self.record(t,E['stage_exit']);self.stages[self.depth-1]=stage;self.record(t,E['stage_entry'])
 
+    @timed_capture
     def end(self,t):
         self.record(t,E['stage_exit']);self.record(t,E['callback_exit']);self.depth-=1
         if self.depth:self.record(t,E['stage_entry'])
@@ -243,7 +307,7 @@ class CapturedDispatcher:
         allocation=capacity_bound(self.config)
         capacity=self.config.get('stage_capture_capacity',allocation['rows'])
         import platform
-        cost=measure_cost(directory)
+        cost=None if os.environ.get('PAPER2_CAPTURE_TIMERS')=='1' else measure_cost(directory)
         self.stage_capture=Recorder(directory,capacity,dict(window=window,backend=self.corpus['backend'],
             k=self.pool.k,replicate=self.config.get('replicate',0),host=platform.node(),
             calibration_only=window!='prototype',atomic_group_mapping='final-milestone-v1',

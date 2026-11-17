@@ -33,7 +33,7 @@ def calibrate_once(corpus_path,k,output,replicate,warmup=2,measurement=10,diagno
     epoch=None;end=(warmup+measurement)*1e9
     import platform
     capture=Recorder(output,4_000_000,dict(window='occupancy',backend=backend,k=k,replicate=replicate,
-        host=platform.node(),calibration_only=True),cost=measure_cost(output))
+        host=platform.node(),calibration_only=True),cost=None if __import__('os').environ.get('PAPER2_CAPTURE_TIMERS')=='1' else measure_cost(output))
     boundaries=Boundaries(capture)
     def dispatch(worker):
         nonlocal serial

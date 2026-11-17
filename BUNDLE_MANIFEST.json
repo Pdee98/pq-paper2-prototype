@@ -1,6 +1,6 @@
 {
   "schema": "paper2-export-v1",
-  "source_commit": "9f8e7599038f54e3c87dca32e389161c1df2262e",
+  "source_commit": "e9a2937a16de1120675e1e0c7de66b60490d97a1",
   "source_dirty": false,
   "baseline_sha256": "83b4a814f99c851c0b5fa4c44e6c2999ceff5f751f70f387e9dac03ec03079f3",
   "baseline_path": "PROTECTED_SHA256.txt",
@@ -74,6 +74,14 @@
       "stderr": "",
       "workflow_sha256": "359025b91f6a723138d2e271a18e5b40891086a5311a71fe7a17ed40a381df7a"
     },
+    "paper2-g3-rehearsal-v2.yml": {
+      "version": "1.7.12",
+      "package_version": "1.7.12.25",
+      "returncode": 0,
+      "stdout": "",
+      "stderr": "",
+      "workflow_sha256": "afe3861526cbb07823e14545f2f69878d377139b25a68da008fc719acc434c2c"
+    },
     "paper2-g3-rehearsal.yml": {
       "version": "1.7.12",
       "package_version": "1.7.12.25",
@@ -127,6 +135,13 @@
       "origin": "generated",
       "origin_path": "generated:src/paper2/prototype/paper2-g3-production-replay.yml",
       "sha256": "359025b91f6a723138d2e271a18e5b40891086a5311a71fe7a17ed40a381df7a",
+      "frozen": false
+    },
+    {
+      "path": ".github/workflows/paper2-g3-rehearsal-v2.yml",
+      "origin": "generated",
+      "origin_path": "generated:src/paper2/prototype/paper2-g3-rehearsal-v2.yml",
+      "sha256": "afe3861526cbb07823e14545f2f69878d377139b25a68da008fc719acc434c2c",
       "frozen": false
     },
     {
@@ -336,7 +351,7 @@
     {
       "path": "src/paper2/prototype/calibration.py",
       "origin_path": "src/paper2/prototype/calibration.py",
-      "sha256": "52a141a454faa7bd9159d6f4bc20bfb06d02dce5c1868d51b319c9a6fdae9b40",
+      "sha256": "95b8e071f768d560227fc9041d5bf3178a83ffe786406ba1e0712e2eca03e15e",
       "frozen": false
     },
     {
@@ -360,7 +375,7 @@
     {
       "path": "src/paper2/prototype/cycle_calibration.py",
       "origin_path": "src/paper2/prototype/cycle_calibration.py",
-      "sha256": "dd9e9167f1e0b136eb069a317ee8d07584e8dec538876d3244ce52ffa0bf1e57",
+      "sha256": "6b4aaa03a77be58bcb49a1b9e0d4f5b4b21248a800b20ffacb4a730eaabc324c",
       "frozen": false
     },
     {
@@ -426,7 +441,7 @@
     {
       "path": "src/paper2/prototype/empirical_replay.py",
       "origin_path": "src/paper2/prototype/empirical_replay.py",
-      "sha256": "8fa7e18a1e5f98373b059e7e969ab84ef1c2f468203dece28336050d949b9084",
+      "sha256": "0605df05e6edc83be21fe88793671ac8c1eb724c4b073f1b05c9f897e8f59c31",
       "frozen": false
     },
     {
@@ -484,6 +499,12 @@
       "frozen": false
     },
     {
+      "path": "src/paper2/prototype/paper2-g3-rehearsal-v2.yml",
+      "origin_path": "src/paper2/prototype/paper2-g3-rehearsal-v2.yml",
+      "sha256": "afe3861526cbb07823e14545f2f69878d377139b25a68da008fc719acc434c2c",
+      "frozen": false
+    },
+    {
       "path": "src/paper2/prototype/paper2-g3-rehearsal.yml",
       "origin_path": "src/paper2/prototype/paper2-g3-rehearsal.yml",
       "sha256": "80f9a73c225745da18a3f37805f36db8efdae9a324dbf941b5dcb0cc89965a2c",
@@ -516,7 +537,7 @@
     {
       "path": "src/paper2/prototype/production.py",
       "origin_path": "src/paper2/prototype/production.py",
-      "sha256": "239c3a0a45586d29acbe37b7297a0f58740fce8dc7e66635a39c13945f2916e6",
+      "sha256": "e9e169449067c91956cebf1757a72437c134a9834a6c78dbf5092a78ae2e9097",
       "frozen": false
     },
     {
@@ -541,6 +562,24 @@
       "path": "src/paper2/prototype/public_corpus.py",
       "origin_path": "src/paper2/prototype/public_corpus.py",
       "sha256": "a1686ec5b52dfcd075cde655cc1038698f231d39107d03173319e95da84bb637",
+      "frozen": false
+    },
+    {
+      "path": "src/paper2/prototype/rehearsal_v2.py",
+      "origin_path": "src/paper2/prototype/rehearsal_v2.py",
+      "sha256": "31af68da720fd222faf103124133c3e387df9ce1d20446f30e1e8f59744d297d",
+      "frozen": false
+    },
+    {
+      "path": "src/paper2/prototype/rehearsal_v2_attempts.py",
+      "origin_path": "src/paper2/prototype/rehearsal_v2_attempts.py",
+      "sha256": "3ebc0068bc9b85ff2867c77627fed07f01f1607a586cac83c9653d742b65b2c9",
+      "frozen": false
+    },
+    {
+      "path": "src/paper2/prototype/rehearsal_v2_q7.py",
+      "origin_path": "src/paper2/prototype/rehearsal_v2_q7.py",
+      "sha256": "b499e9d566af491816fa8ac9d80ddcc30b3a0422becb60259e9746adc7262180",
       "frozen": false
     },
     {
@@ -606,7 +645,7 @@
     {
       "path": "src/paper2/prototype/stage_capture.py",
       "origin_path": "src/paper2/prototype/stage_capture.py",
-      "sha256": "883960405278cd201eb03e72e3b5e4be592c62c164a335487298584ee564cbe9",
+      "sha256": "d35015aff8fd2c4d55186aa72cee72d9c90ceaa3c2897eda9ae2ee6252a71e7f",
       "frozen": false
     },
     {
@@ -918,7 +957,7 @@
     {
       "path": "tests/paper2/test_phase5a_deviation9_empirical.py",
       "origin_path": "tests/paper2/test_phase5a_deviation9_empirical.py",
-      "sha256": "9d7b881c9eb9a6cbe0a5b1fdb5ca698e1e3c726b290de33756aa6bfb81409207",
+      "sha256": "f0605e27b413b3e4044dcf830fb0614c05d21f517127b2138ac172e563df26f7",
       "frozen": false
     },
     {
@@ -960,13 +999,19 @@
     {
       "path": "tests/paper2/test_phase5a_protocol.py",
       "origin_path": "tests/paper2/test_phase5a_protocol.py",
-      "sha256": "6e9ab105afc0b8b72b7376292fb53a9606c1f9376f26e177c140d891ebc55afe",
+      "sha256": "083945fcc4d6cc919d3ef1cc6058625f06570719befba0be7fa38a6bded9c39d",
       "frozen": false
     },
     {
       "path": "tests/paper2/test_phase5a_prototype.py",
       "origin_path": "tests/paper2/test_phase5a_prototype.py",
       "sha256": "842589e6c5fc165dbb26bb12ed77932f0b74b47fe0b2908d320afed3dbdcc457",
+      "frozen": false
+    },
+    {
+      "path": "tests/paper2/test_phase5a_rehearsal_v2.py",
+      "origin_path": "tests/paper2/test_phase5a_rehearsal_v2.py",
+      "sha256": "123f54b19b0308b6d8a3f9124d012e4da1745b0697830004d02349d5a7e8ad69",
       "frozen": false
     },
     {

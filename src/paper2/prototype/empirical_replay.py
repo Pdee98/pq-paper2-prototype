@@ -158,7 +158,8 @@ def simulate(packet,table,sample,output):
     else:factory=lambda c:ZeroEmpiricalModel(c,packet,sample,prepared)
     return run_model(config,model_type=factory)
 
-def selection(receipt,code_commit):
+def historical_selection(receipt,code_commit):
+    """Phase E reference only; never called by the production selector."""
     if receipt is None:raise ValueError('production refuses without sealed rehearsal-v2 mechanism receipt')
     replay.verify_files(receipt,'MECHANISM_MANIFEST.json');value=replay.read(Path(receipt)/'mechanism.json')
     if value.get('namespace')!='rehearsal-v2 mechanism; excluded from G3' or value.get('code_commit')!=code_commit:
@@ -177,6 +178,42 @@ def selection(receipt,code_commit):
     if value['reading']=='MECHANISM SUPPORTED':return 'explicit'
     if value['reading']=='NOT SUPPORTED':return 'legacy'
     raise ValueError('undefined mechanism model selection')
+
+
+def selection(receipt,code_commit):
+    """Production accepts only the sealed, reproducible rehearsal-v2 Q7 reader."""
+    if receipt is None:raise ValueError('production refuses without sealed rehearsal-v2 Q7 receipt')
+    from . import rehearsal_v2_q7 as q7
+    receipt=Path(receipt)
+    from .input_trust import reject
+    reject(receipt)
+    if not (receipt/'RESULT_MANIFEST.json').is_file():raise ValueError('requires sealed rehearsal-v2 Q7 reader verdict')
+    replay.verify_files(receipt,'RESULT_MANIFEST.json')
+    value=replay.read(receipt/'result.json')
+    reader=sha256_file(Path(q7.__file__))
+    if (value.get('namespace')!='paper2-g3-rehearsal-v2' or value.get('code_commit')!=code_commit or
+            value.get('reader_source_sha256')!=reader):
+        raise ValueError('wrong Q7 reader digest, namespace or source commit')
+    records=[]
+    for directory in sorted((receipt/'cells').iterdir()) if (receipt/'cells').is_dir() else ():
+        replay.verify_files(directory,'RESULT_MANIFEST.json')
+        original=directory/'ORIGINAL_RESULT_MANIFEST.json'
+        if sha256_file(original)!=(directory/'ORIGINAL_RESULT_MANIFEST.json.sha256').read_text().strip():
+            raise ValueError('embedded original result seal mismatch')
+        seal=replay.read(original);result=replay.read(directory/'result.json')
+        row=next(r for r in seal['files'] if r['path']=='result.json')
+        if sha256_file(directory/'result.json')!=row['sha256']:raise ValueError('embedded original result content mismatch')
+        provenance=seal['provenance']
+        if (result.get('namespace')!='paper2-g3-rehearsal-v2' or result.get('code_commit')!=code_commit or
+            result.get('reader_source_sha256')!=reader or provenance.get('source_code_commit')!=code_commit or
+            provenance.get('replay_code_commit')!=code_commit or provenance.get('replay_tree_clean') is not True):
+            raise ValueError('embedded Q7 reader digest or source provenance mismatch')
+        records.append(result)
+    computed=q7.evaluate(records)
+    if any(value.get(k)!=v for k,v in computed.items()):raise ValueError('Q7 verdict does not reproduce sealed inputs')
+    if computed['verdict']=='SUPPORTED':return 'explicit'
+    if computed['verdict']=='NOT SUPPORTED':return 'legacy'
+    raise ValueError('INVALID Q7 evidence: no model selection')
 
 @tracked_run
 def execute(packet,inputs,output,*,purpose,mechanism=None,identity=None):

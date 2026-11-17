@@ -20,6 +20,7 @@ from src.paper2.model.engine import _git_state
 from .work_budget import require as require_budget
 
 REHEARSAL = 'paper2-g3-rehearsal-v1'
+REHEARSAL_V2 = 'paper2-g3-rehearsal-v2'
 PRODUCTION_ENABLED = False
 PARTS = {'7X': 'xmss', '7M': 'ml_dsa_44'}
 
@@ -53,15 +54,15 @@ def parameters(cell, rep, purpose):
     p = group_parameters(cell, rep)
     # Validation identities remain exactly the established group_parameters.
     # Rehearsal has an explicitly separate seed namespace and never counts as G3.
-    if purpose == REHEARSAL:
-        p['run_id'] = REHEARSAL+'-'+corpus_group(cell, rep)
+    if purpose in (REHEARSAL,REHEARSAL_V2):
+        p['run_id'] = purpose+'-'+corpus_group(cell, rep)
     return p
 
 
 def plan(refs, part, purpose='validation', selected=None):
     all_cells = cycle_cells({b:refs[b] for b in ('xmss','ml_dsa_44')})
     cells = {i:c for i,c in enumerate(all_cells)}
-    if purpose == REHEARSAL:
+    if purpose in (REHEARSAL,REHEARSAL_V2):
         cells = {i:cells[i] for i in (5, 9)}
     else:
         cells = {i:c for i,c in cells.items() if c['backend'] == PARTS[part]}
@@ -73,7 +74,7 @@ def plan(refs, part, purpose='validation', selected=None):
                 raise RuntimeError('required secondary/follow-up cell fails dispatcher guard')
             continue
         if selected is not None and i not in selected: continue
-        reps = [3] if selected is not None else [0] if purpose == REHEARSAL or c.get('role') == 'secondary' else range(3)
+        reps = [3] if selected is not None else [0] if purpose in (REHEARSAL,REHEARSAL_V2) or c.get('role') == 'secondary' else range(3)
         for rep in reps:
             name = 'secondary-regime' if c.get('role') == 'secondary' else corpus_group(c,rep)
             if name not in groups:
@@ -81,6 +82,7 @@ def plan(refs, part, purpose='validation', selected=None):
                 groups[name] = dict(cell=c,replicate=rep,transactions=len(w['transactions']),
                                     messages=len(w['transactions'])+len(w['blocks']))
             rid = 'secondary-regime' if c.get('role') == 'secondary' else f'cell{i}-r{rep}'
+            if purpose==REHEARSAL_V2:rid=REHEARSAL_V2+'-'+rid
             rows.append(dict(run_id=rid,cell_id=i,replicate=rep,group=name,cell=c,
                              transactions=groups[name]['transactions']))
     # Run both policies against one signed group before releasing its full corpus.
@@ -105,9 +107,10 @@ def projection(rows,groups,backends):
 
 def prepare(root,part,attempt=1,purpose='validation',mode='initial',previous=None,aggregate=None,selected=None):
     root = Path(root).resolve()
-    if purpose != REHEARSAL and not PRODUCTION_ENABLED: raise RuntimeError(validation_caps.BLOCK_MESSAGE)
-    if purpose == REHEARSAL:
-        if attempt!=1 or mode!='initial' or previous or aggregate or selected: raise ValueError('rehearsal is a single diagnostic attempt')
+    if purpose not in (REHEARSAL,REHEARSAL_V2) and not PRODUCTION_ENABLED: raise RuntimeError(validation_caps.BLOCK_MESSAGE)
+    if purpose in (REHEARSAL,REHEARSAL_V2):
+        allowed=(1,2) if purpose==REHEARSAL_V2 else (1,)
+        if attempt not in allowed or mode!='initial' or previous or aggregate or selected: raise ValueError('rehearsal attempt is not authorised')
         backends=['xmss','ml_dsa_44']
     else:
         authorize(part,attempt,mode,previous,aggregate,selected);backends=[PARTS[part]]
@@ -115,6 +118,11 @@ def prepare(root,part,attempt=1,purpose='validation',mode='initial',previous=Non
     if runner.platform.machine().lower() not in ('arm64','aarch64') or len(os.sched_getaffinity(0))<4:
         raise RuntimeError('four-vCPU ARM runner required')
     if not (root/'conformance.json').is_file(): raise ValueError('native conformance receipt required')
+    if purpose==REHEARSAL_V2:
+        from .rehearsal_v2 import verify_ledger
+        from .rehearsal_v2_attempts import load as load_attempt
+        load_attempt(root,attempt)
+        if verify_ledger(root)['attempt']!=attempt:raise ValueError('ledger attempt differs from execution')
     code = os.environ.get('GITHUB_SHA') or _git_state()['commit']
     if previous and previous.get('code_commit')!=code: raise ValueError('attempt code commit differs')
     if aggregate and aggregate.get('code_commit')!=code: raise ValueError('follow-up code commit differs')
@@ -122,7 +130,7 @@ def prepare(root,part,attempt=1,purpose='validation',mode='initial',previous=Non
     refs={};cal_times={};pilot_seconds=0.
     for b in backends:
         pilot_parameters=runner.parameters(2560,0,.05,horizon=.1)
-        if purpose==REHEARSAL:pilot_parameters['run_id']=REHEARSAL+'-pilot-'+b
+        if purpose in (REHEARSAL,REHEARSAL_V2):pilot_parameters['run_id']=purpose+'-pilot-'+b
         cp=private/(b+'-pilot.json');pilot_start=time.perf_counter()
         cap=runner.STAGE_CAPS['pilot']-pilot_seconds
         require_budget(root,cap)
@@ -133,7 +141,7 @@ def prepare(root,part,attempt=1,purpose='validation',mode='initial',previous=Non
         at=time.perf_counter()
         # Per-backend caps replace the historical shared account() cap.
         require_budget(root,validation_caps.CALIBRATION[b])
-        fresh=calibrate_backend(b,cp,root,None,validation_caps.CALIBRATION[b],False,REHEARSAL if purpose==REHEARSAL else '')
+        fresh=calibrate_backend(b,cp,root,None,validation_caps.CALIBRATION[b],False,purpose if purpose in (REHEARSAL,REHEARSAL_V2) else '')
         refs[b]={int(k):v for k,v in fresh.items()};cal_times[b]=time.perf_counter()-at
         if cal_times[b]>validation_caps.CALIBRATION[b]: raise TimeoutError('per-backend calibration cap')
     # cycle_cells requires both backend keys; irrelevant backend is a placeholder
@@ -144,10 +152,14 @@ def prepare(root,part,attempt=1,purpose='validation',mode='initial',previous=Non
         filled[other]=next(iter(refs.values()))
     cells,rows,groups=plan(filled,part,purpose,selected)
     proj=projection(rows,groups,backends);replay.save(root/'projection.json',proj)
+    if purpose==REHEARSAL_V2:
+        from .rehearsal_v2 import qualify_projection
+        proj=qualify_projection(proj,rows,groups,root)
+        replay.save(root/'projection.json',proj)
     if not proj['passed']: raise RuntimeError('conservative projection exceeds 238 minutes; no reduction permitted')
     disk=transport.disk_guard(root,proj['transport']['peak_runner_bytes'])
     replay.save(root/'disk-pre-presigning.json',disk)
-    state=dict(purpose=purpose,run_id=REHEARSAL if purpose==REHEARSAL else 'paper2-g3-v1',part=part,attempt=attempt,mode=mode,previous_attempt_evidence=previous,
+    state=dict(purpose=purpose,run_id=purpose if purpose in (REHEARSAL,REHEARSAL_V2) else 'paper2-g3-v1',part=part,attempt=attempt,mode=mode,previous_attempt_evidence=previous,
                code_commit=code,source_run_id=os.environ.get('GITHUB_RUN_ID','local'),cells=cells,rows=rows,groups=groups,
                projection=proj,refs=refs,calibration_seconds=cal_times,signing_seconds={},completed=[],known_objects={},
                uploads=[],operational_status='collecting',followup_authorization=aggregate)
@@ -191,6 +203,14 @@ def run_slot(root,slot):
           progress_path=base/'prototype/progress.jsonl',phase_timeouts=caps,partial_dir=root/'timeouts'/rid)
     packet=root.parent/'packet'/rid;ref=state['refs'][b][str(row['cell']['k'])]
     seal=replay.create_packet(packet,cfg,cp,proto,ref['held_out_cycle_samples'],row['cell'],row['replicate'],primary=ref['primary_cycle_samples'])
+    if state['purpose']==REHEARSAL_V2:
+        from .empirical_replay import bind
+        from .rehearsal_v2 import verify_ledger
+        info=replay.read(packet/'info.json')
+        info.update(attempt=state['attempt'],attempt_1_run_id=verify_ledger(root)['attempt_1_run_id'])
+        replay.save(packet/'info.json',info);replay.seal(packet,'REPLAY_MANIFEST.json')
+        bind(packet,{s:Path(ref[s+'_dispatcher_tables']) for s in ('primary','held_out')})
+        seal=replay.sha256_file(packet/'REPLAY_MANIFEST.json')
     public_corpus.audit_upload(packet)
     info=replay.read(packet/'info.json')
     state.setdefault('compact_groups',{})[row['group']]=info['public_corpus']
@@ -202,6 +222,9 @@ def run_slot(root,slot):
     state['pending']=dict(slot=slot,row=row,manifest_sha256=seal,packet=str(packet),upload=str(upload),base=str(base),
                           arm_audit=replay.read(packet/'info.json')['arm_corpus_audit'],info=replay.read(packet/'info.json'),phase_seconds=proto['phase_seconds'],drain_complete=proto['drain_complete'])
     state.setdefault('arm_corpus_audits',{})[rid]=state['pending']['arm_audit']
+    if state['purpose']==REHEARSAL_V2:
+        from .rehearsal_v2 import volume_receipt
+        replay.save(root/('volumes-'+rid+'.json'),volume_receipt(base/'prototype',upload,root))
     save_state(root,state)
     return True
 

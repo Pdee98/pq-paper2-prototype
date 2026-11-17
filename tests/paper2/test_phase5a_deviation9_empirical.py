@@ -90,7 +90,10 @@ class Empirical(unittest.TestCase):
             self.assertEqual(old_draw,job_draw_integer('F7',0,'service_admission',['admission','A']))
             self.assertNotEqual(t.draw('F7',0,'unlinked_send_admission','A'),t.draw('F7',0,'arrival','A'))
 
-    def test_capture_tables_transport_roundtrip_and_both_replay_models(self):
+    @patch('src.paper2.prototype.empirical_replay.selection',side_effect=e.historical_selection)
+    def test_capture_tables_transport_roundtrip_and_both_replay_models(self,historical_selector):
+        # Author decision 2026-11-17: retain Phase E's reference reader only
+        # in historical fixtures. Current production Q7 selection has separate tests.
         with tempfile.TemporaryDirectory() as td:
             root=Path(td);costs=inputs(root/'costs')
             doc=corpus.build(old.Deviation5().fixture(dict(name='fifo')),'sleep');cp=corpus.write(doc,root/'corpus.json')

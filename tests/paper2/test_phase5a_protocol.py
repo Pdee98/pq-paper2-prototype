@@ -226,7 +226,7 @@ class Protocol(unittest.TestCase):
             root=Path(root);manifest=export.export(root/"bundle",allow_dirty=True)
             receipt=manifest["actionlint"]
             self.assertEqual((receipt["returncode"],receipt["stdout"],receipt["stderr"]),(0,"",""))
-            self.assertEqual(set(manifest["actionlint_workflows"]),{"paper2-g3.yml","paper2-g3-replay.yml","paper2-g3-diagnostic.yml","paper2-g3-validation-dryrun.yml","paper2-g3-rehearsal.yml","paper2-g3-production-replay.yml","paper2-arm-disk-probe.yml"})
+            self.assertEqual(set(manifest["actionlint_workflows"]),{"paper2-g3.yml","paper2-g3-replay.yml","paper2-g3-diagnostic.yml","paper2-g3-validation-dryrun.yml","paper2-g3-rehearsal.yml","paper2-g3-production-replay.yml","paper2-arm-disk-probe.yml","paper2-g3-rehearsal-v2.yml"})
             for name,item in manifest["actionlint_workflows"].items():
                 self.assertEqual((item["returncode"],item["stdout"],item["stderr"]),(0,"",""))
                 self.assertEqual(item["workflow_sha256"],analysis.sha256_file(root/"bundle/.github/workflows"/name))

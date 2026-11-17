@@ -89,8 +89,11 @@ def calibrate_cycle(corpus_path,k,output,replicate,traffic_rate,throughput,warmu
     output=Path(output);output.mkdir(parents=True,exist_ok=False);pilot=json.loads(Path(corpus_path).read_bytes());duration=warmup+measurement
     with tempfile.TemporaryDirectory(prefix='paper2-cycle-synthetic-') as td:
         rate=max(256/duration,throughput)
-        backlog=traffic_workload(rate,duration,'paper2-cycle-backlog-'+pilot['backend']+str(k)+seed_tag,'backlog:')
-        live=traffic_workload(traffic_rate,duration,'paper2-cycle-traffic-'+pilot['backend']+str(k)+seed_tag,'traffic:')
+        def identity(family):
+            return (seed_tag+'-calibration-'+family+'-'+pilot['backend']+'-k'+str(k)
+                    if seed_tag=='paper2-g3-rehearsal-v2' else 'paper2-cycle-'+family+'-'+pilot['backend']+str(k)+seed_tag)
+        backlog=traffic_workload(rate,duration,identity('backlog'),'backlog:')
+        live=traffic_workload(traffic_rate,duration,identity('traffic'),'traffic:')
         def times(w):return [w['block_start']+i*w['block_period'] for i in range(len(w['blocks']))]
         ordered=sorted(zip(times(backlog)+times(live),backlog['blocks']+live['blocks']),key=lambda pair:pair[0])
         w=dict(live,transactions={**backlog['transactions'],**live['transactions']},admissions=backlog['admissions']+live['admissions'],
